@@ -1,6 +1,6 @@
 # Degradation-Aware Image Restoration
 
-This is an image restoration project built around a small degradation-aware model. The goal is to synthesize corruptions, estimate the degradation, and use that estimate to guide restoration.
+This is an image restoration project built around a small degradation-aware model. The goal of this project is to implement and refine state-of-the-art methods for image transformation and restoration. This is mainly done by synthesizing corruptions, estimating the degradation, and using that estimation to guide the restoration.
 
 ## Project Overview
 
@@ -249,5 +249,5 @@ Example history structure:
 
 - NAFNet: [https://arxiv.org/abs/2204.04676](https://arxiv.org/abs/2204.04676)
 - NAFNet: [https://github.com/chxy95/NAFNet](https://github.com/chxy95/NAFNet)
-- DIV2K Dataset: [https://data.vision.ee.ethz.ch/cvl/DIV2K/](https://data.vision.ee.ethz.ch/cvl/DIV2K/)
+- DF2K + OST Dataset: [https://www.kaggle.com/datasets/thaihoa1476050/df2k-ost](https://www.kaggle.com/datasets/thaihoa1476050/df2k-ost)
 - VGG Perceptual Loss: [https://arxiv.org/abs/1603.08155](https://arxiv.org/abs/1603.08155)
