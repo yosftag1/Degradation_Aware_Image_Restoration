@@ -51,11 +51,12 @@ def setup_training(config, debug=False):
     )
     
     # Learning rate scheduler
+    warm_restart_period = max(1, config.EPOCHS - config.WARMUP_EPOCHS)
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer,
-        T_0=config.EPOCHS - config.WARMUP_EPOCHS,
+        T_0=warm_restart_period,
         T_mult=1,
-        eta_min=1e-6
+        eta_min=1e-6,
     )
     
     return model, loss_fn, optimizer, scheduler, device
