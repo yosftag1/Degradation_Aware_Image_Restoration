@@ -1,8 +1,15 @@
 """Quick start and testing utilities."""
 
+import os
+import sys
 import torch
 import torch.nn as nn
 import numpy as np
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from config import Config
 from models.architecture import DegradationAwareRestoration
 from data.dataset import DegradationPipeline, ImageRestorationDataset
