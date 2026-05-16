@@ -33,9 +33,12 @@ class DegradationPipeline:
     
     def apply_jpeg_compression(self, image, severity):
         """Apply JPEG compression with given severity."""
-        quality = int(self.config.JPEG_QUALITY_RANGE[0] + 
-                     (1 - severity) * (self.config.JPEG_QUALITY_RANGE[1] - self.config.JPEG_QUALITY_RANGE[0]))
-        quality = np.clip(quality, 10, 100)
+        quality = int(
+            self.config.JPEG_QUALITY_RANGE[0]
+            + (1 - severity)
+            * (self.config.JPEG_QUALITY_RANGE[1] - self.config.JPEG_QUALITY_RANGE[0])
+        )
+        quality = int(np.clip(quality, 1, 95))
         
         # Convert to PIL, compress, convert back
         pil_image = Image.fromarray(image)
