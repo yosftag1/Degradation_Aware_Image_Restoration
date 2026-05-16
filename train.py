@@ -216,8 +216,10 @@ def train(config, debug=False, resume_from=None):
     
     # Load datasets
     print("Loading datasets...")
-    train_dataset = create_div2k_dataset(config.DATASET_PATH, config, is_train=True)
-    val_dataset = create_div2k_dataset(config.DATASET_PATH, config, is_train=False)
+    train_root = getattr(config, "TRAIN_DATASET_PATH", None) or config.DATASET_PATH
+    val_root = getattr(config, "VAL_DATASET_PATH", None) or config.DATASET_PATH
+    train_dataset = create_div2k_dataset(train_root, config, is_train=True)
+    val_dataset = create_div2k_dataset(val_root, config, is_train=False)
     
     train_loader = DataLoader(
         train_dataset,
@@ -318,6 +320,8 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", help="Run in debug mode with smaller dataset")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--data-root", type=str, default=None, help="Override dataset root directory")
+    parser.add_argument("--train-root", type=str, default=None, help="Training dataset root directory")
+    parser.add_argument("--val-root", type=str, default=None, help="Validation dataset root directory")
     parser.add_argument("--output-dir", type=str, default=None, help="Override output directory")
     parser.add_argument("--checkpoint-dir", type=str, default=None, help="Override checkpoint directory")
     parser.add_argument("--log-dir", type=str, default=None, help="Override log directory")
@@ -329,6 +333,10 @@ if __name__ == "__main__":
     config = DebugConfig() if args.debug else Config()
     if args.data_root:
         config.DATASET_PATH = args.data_root
+    if args.train_root:
+        config.TRAIN_DATASET_PATH = args.train_root
+    if args.val_root:
+        config.VAL_DATASET_PATH = args.val_root
     if args.output_dir:
         config.OUTPUT_DIR = args.output_dir
     if args.checkpoint_dir:
