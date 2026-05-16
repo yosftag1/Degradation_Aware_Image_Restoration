@@ -266,8 +266,8 @@ def train(config, debug=False, resume_from=None):
             model, train_loader, loss_fn, optimizer, device, config, epoch
         )
         
-        # Validate every VAL_INTERVAL batches or at epoch end
-        if epoch % max(1, config.EPOCHS // 5) == 0 or epoch == config.EPOCHS:
+        # Validate every N epochs (configurable) or at epoch end
+        if epoch % max(1, config.VAL_EPOCH_INTERVAL) == 0 or epoch == config.EPOCHS:
             val_loss, val_losses = validate(model, val_loader, loss_fn, device, config, epoch=epoch)
             
             print(f"\nTrain Loss: {train_loss:.6f}")

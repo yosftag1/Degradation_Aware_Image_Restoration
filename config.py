@@ -69,6 +69,7 @@ class Config:
     # Logging
     LOG_INTERVAL = 100
     VAL_INTERVAL = 500
+    VAL_EPOCH_INTERVAL = 2
     SEED = 42
     
 
