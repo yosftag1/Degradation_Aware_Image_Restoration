@@ -220,6 +220,7 @@ def create_div2k_dataset(dataset_path, config, is_train=True):
             all_paths.extend(glob(os.path.join(dataset_path, pat), recursive=True))
 
         all_paths = sorted(list(set(all_paths)))
+        print(f"Found {len(all_paths)} total images under {dataset_path}")
         if not all_paths:
             raise FileNotFoundError(f"No images found in {dataset_path}. Provide a valid dataset folder.")
 
