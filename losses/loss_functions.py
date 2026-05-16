@@ -60,6 +60,9 @@ class PerceptualLoss(nn.Module):
         )
         
         self.loss_fn = nn.L1Loss()
+
+        # Ensure buffers and VGG features live on the requested device.
+        self.to(device)
     
     def normalize(self, x):
         """Normalize using ImageNet statistics."""
