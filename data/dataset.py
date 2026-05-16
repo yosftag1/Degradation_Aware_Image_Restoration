@@ -228,19 +228,19 @@ def create_div2k_dataset(dataset_path, config, is_train=True):
         random.shuffle(all_paths)
 
         # Determine split counts
-        # Prefer explicit counts in config when available, otherwise use 90/10 split
+        # If count is 0 or >= dataset size, use all images.
         if is_train:
-            if config.TRAIN_IMAGES_COUNT and config.TRAIN_IMAGES_COUNT < len(all_paths):
-                selected = all_paths[:config.TRAIN_IMAGES_COUNT]
-            else:
-                split_idx = int(len(all_paths) * 0.9)
-                selected = all_paths[:split_idx]
+            count = config.TRAIN_IMAGES_COUNT
         else:
-            if config.VAL_IMAGES_COUNT and config.VAL_IMAGES_COUNT < len(all_paths):
-                selected = all_paths[-config.VAL_IMAGES_COUNT:]
-            else:
-                split_idx = int(len(all_paths) * 0.9)
-                selected = all_paths[split_idx:]
+            count = config.VAL_IMAGES_COUNT
+
+        if count is None:
+            split_idx = int(len(all_paths) * 0.9)
+            selected = all_paths[:split_idx] if is_train else all_paths[split_idx:]
+        elif count <= 0 or count >= len(all_paths):
+            selected = all_paths
+        else:
+            selected = all_paths[:count] if is_train else all_paths[-count:]
 
         print(f"Using {len(selected)} images from {dataset_path} for {'train' if is_train else 'val'} set")
         return ImageRestorationDataset(selected, config, is_train=is_train)

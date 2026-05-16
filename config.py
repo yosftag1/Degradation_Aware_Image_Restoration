@@ -25,8 +25,8 @@ class Config:
     # Data
     DATASET_NAME = "DIV2K"
     DATASET_PATH = "./data/DIV2K"
-    TRAIN_IMAGES_COUNT = 800
-    VAL_IMAGES_COUNT = 100
+    TRAIN_IMAGES_COUNT = 0  # 0 means use all available images
+    VAL_IMAGES_COUNT = 0    # 0 means use all available images
     OUTPUT_DIR = "./outputs"
     LOG_DIR = "./logs"
     CHECKPOINT_DIR = "./checkpoints"
