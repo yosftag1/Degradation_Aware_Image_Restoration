@@ -93,9 +93,15 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     """Decoder with progressive upsampling and skip connections."""
     
-    def __init__(self, base_channels=32, num_blocks=4, out_channels=3):
+    def __init__(self, base_channels=32, num_blocks=4, out_channels=3, embedding_dim=16):
         super().__init__()
-        self.degradation_proj = nn.LazyConv2d(base_channels * (2 ** (num_blocks - 1)), 1)
+        bottleneck_channels = base_channels * (2 ** (num_blocks - 1))
+        self.embedding_dim = embedding_dim
+        self.degradation_proj = nn.Conv2d(
+            bottleneck_channels + embedding_dim,
+            bottleneck_channels,
+            kernel_size=1,
+        )
         self.upsample = nn.ModuleList()
         self.fuse = nn.ModuleList()
         self.blocks = nn.ModuleList()
@@ -124,6 +130,11 @@ class Decoder(nn.Module):
         x = features[-1]
 
         if degradation_embedding is not None:
+            if degradation_embedding.shape[1] != self.embedding_dim:
+                raise ValueError(
+                    f"Expected degradation embedding dim {self.embedding_dim}, "
+                    f"got {degradation_embedding.shape[1]}"
+                )
             B, _, H, W = x.shape
             deg_map = degradation_embedding.view(B, -1, 1, 1).expand(B, -1, H, W)
             x = torch.cat([x, deg_map], dim=1)
@@ -192,6 +203,7 @@ class DegradationAwareRestoration(nn.Module):
             base_channels=config.BASE_CHANNELS,
             num_blocks=config.NUM_BLOCKS,
             out_channels=config.OUTPUT_CHANNELS,
+            embedding_dim=config.DEGRADATION_EMBEDDING_DIM,
         )
         
         self.degradation_estimator = DegradationEstimator(
