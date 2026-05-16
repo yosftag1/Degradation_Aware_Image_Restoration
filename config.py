@@ -20,7 +20,8 @@ class Config:
         "exposure_issue",
     ]
     DEGRADATION_EMBEDDING_DIM = 16
-    SEVERITY_LEVELS = 5  # 0.2, 0.4, 0.6, 0.8, 1.0
+    SEVERITY_LEVELS = 5
+    MIN_SEVERITY = 0.4
     
     # Data
     DATASET_NAME = "DIV2K"
@@ -31,7 +32,7 @@ class Config:
     LOG_DIR = "./logs"
     CHECKPOINT_DIR = "./checkpoints"
     VAL_SAMPLE_INTERVAL = 1  # Save sample images every N epochs (0 to disable)
-    VAL_SAMPLE_COUNT = 5      # Number of validation samples to save
+    VAL_SAMPLE_COUNT = 10      # Number of validation samples to save
     
     # Image processing
     PATCH_SIZE = 256
@@ -39,16 +40,16 @@ class Config:
     NUM_WORKERS = 4
     
     # Degradation pipeline
-    GAUSSIAN_NOISE_RANGE = (0.01, 0.1)
-    MOTION_BLUR_KERNEL_RANGE = (3, 15)
+    GAUSSIAN_NOISE_RANGE = (0.02, 0.18)
+    MOTION_BLUR_KERNEL_RANGE = (3, 25)
     MOTION_BLUR_ANGLE_RANGE = (0, 180)
-    JPEG_QUALITY_RANGE = (10, 80)
-    COLOR_SHIFT_RANGE = (0.0, 0.25)
-    SATURATION_LOSS_RANGE = (0.0, 0.5)
-    HUE_SHIFT_RANGE = (0, 20)
-    BRIGHTNESS_RANGE = (0.0, 0.35)
-    CONTRAST_RANGE = (0.5, 1.5)
-    GAMMA_RANGE = (0.7, 1.5)
+    JPEG_QUALITY_RANGE = (5, 60)
+    COLOR_SHIFT_RANGE = (0.0, 0.4)
+    SATURATION_LOSS_RANGE = (0.0, 0.7)
+    HUE_SHIFT_RANGE = (0, 30)
+    BRIGHTNESS_RANGE = (0.0, 0.5)
+    CONTRAST_RANGE = (0.3, 1.8)
+    GAMMA_RANGE = (0.5, 2.0)
     
     # Training
     LEARNING_RATE = 1e-3
@@ -69,7 +70,7 @@ class Config:
     # Logging
     LOG_INTERVAL = 100
     VAL_INTERVAL = 500
-    VAL_EPOCH_INTERVAL = 2
+    VAL_EPOCH_INTERVAL = 1
     SEED = 42
     
 

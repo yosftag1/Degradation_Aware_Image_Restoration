@@ -13,7 +13,8 @@ class DegradationPipeline:
     def __init__(self, config):
         self.config = config
         self.degradation_types = config.DEGRADATION_TYPES
-        self.severity_levels = np.linspace(0.2, 1.0, config.SEVERITY_LEVELS)
+        min_severity = getattr(config, "MIN_SEVERITY", 0.2)
+        self.severity_levels = np.linspace(min_severity, 1.0, config.SEVERITY_LEVELS)
     
     def apply_gaussian_noise(self, image, severity):
         """Apply Gaussian noise with given severity."""

@@ -9,11 +9,12 @@ import random
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torchvision.utils import save_image
+from torchvision.utils import make_grid, save_image
 from tqdm import tqdm
 import json
 from datetime import datetime
 import numpy as np
+from PIL import Image, ImageDraw
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
@@ -80,8 +81,23 @@ def save_validation_samples(batch, restored, config, epoch):
 
     for idx in range(degraded.size(0)):
         triplet = torch.stack([degraded[idx], restored[idx], clean[idx]], dim=0)
+        grid = make_grid(triplet, nrow=3, padding=2)
+        grid = grid.clamp(0, 1)
+        grid_img = (grid * 255).byte().permute(1, 2, 0).numpy()
+
+        pil_img = Image.fromarray(grid_img)
+        draw = ImageDraw.Draw(pil_img)
+        labels = ["degraded", "restored", "clean"]
+        cell_w = degraded.shape[-1]
+        padding = 2
+        for col, label in enumerate(labels):
+            x = padding + col * (cell_w + padding) + 4
+            y = 4
+            draw.text((x + 1, y + 1), label, fill=(0, 0, 0))
+            draw.text((x, y), label, fill=(255, 255, 255))
+
         save_path = os.path.join(out_dir, f"sample_{idx:02d}.png")
-        save_image(triplet, save_path, nrow=3)
+        pil_img.save(save_path)
 
 
 def train_epoch(model, train_loader, loss_fn, optimizer, device, config, epoch):
