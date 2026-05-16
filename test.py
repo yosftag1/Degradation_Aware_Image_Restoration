@@ -2,6 +2,9 @@
 
 import os
 import sys
+# Kaggle notebook path fix
+sys.path.insert(0, '/kaggle/working/Degradation_Aware_Image_Restoration')
+
 import torch
 import torch.nn as nn
 import numpy as np

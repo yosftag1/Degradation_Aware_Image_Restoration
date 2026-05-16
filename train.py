@@ -2,6 +2,9 @@
 
 import os
 import sys
+# Kaggle notebook path fix
+sys.path.insert(0, '/kaggle/working/Degradation_Aware_Image_Restoration')
+
 import random
 import torch
 import torch.optim as optim
