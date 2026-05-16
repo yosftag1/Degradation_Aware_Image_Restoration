@@ -30,6 +30,8 @@ class Config:
     OUTPUT_DIR = "./outputs"
     LOG_DIR = "./logs"
     CHECKPOINT_DIR = "./checkpoints"
+    VAL_SAMPLE_INTERVAL = 1  # Save sample images every N epochs (0 to disable)
+    VAL_SAMPLE_COUNT = 5      # Number of validation samples to save
     
     # Image processing
     PATCH_SIZE = 256

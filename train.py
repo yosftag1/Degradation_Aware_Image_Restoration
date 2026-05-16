@@ -9,6 +9,7 @@ import random
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torchvision.utils import save_image
 from tqdm import tqdm
 import json
 from datetime import datetime
@@ -67,6 +68,22 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def save_validation_samples(batch, restored, config, epoch):
+    """Save a few validation samples (degraded | restored | clean)."""
+    max_samples = max(1, config.VAL_SAMPLE_COUNT)
+    degraded = batch['degraded'][:max_samples].detach().cpu()
+    clean = batch['clean'][:max_samples].detach().cpu()
+    restored = restored[:max_samples].detach().cpu()
+
+    out_dir = os.path.join(config.OUTPUT_DIR, "val_samples", f"epoch_{epoch:03d}")
+    os.makedirs(out_dir, exist_ok=True)
+
+    for idx in range(degraded.size(0)):
+        triplet = torch.stack([degraded[idx], restored[idx], clean[idx]], dim=0)
+        save_path = os.path.join(out_dir, f"sample_{idx:02d}.png")
+        save_image(triplet, save_path, nrow=3)
+
+
 def train_epoch(model, train_loader, loss_fn, optimizer, device, config, epoch):
     """Train for one epoch."""
     model.train()
@@ -121,7 +138,7 @@ def train_epoch(model, train_loader, loss_fn, optimizer, device, config, epoch):
 
 
 @torch.no_grad()
-def validate(model, val_loader, loss_fn, device, config):
+def validate(model, val_loader, loss_fn, device, config, epoch=None):
     """Validate model."""
     model.eval()
     total_loss = 0.0
@@ -129,6 +146,13 @@ def validate(model, val_loader, loss_fn, device, config):
         'l1': 0.0, 'perceptual': 0.0, 'frequency': 0.0,
         'deg_type': 0.0, 'severity': 0.0
     }
+
+    save_samples = (
+        epoch is not None
+        and config.VAL_SAMPLE_INTERVAL > 0
+        and epoch % config.VAL_SAMPLE_INTERVAL == 0
+    )
+    samples_saved = False
     
     for batch in tqdm(val_loader, desc="Validation"):
         degraded = batch['degraded'].to(device)
@@ -146,6 +170,10 @@ def validate(model, val_loader, loss_fn, device, config):
             severity, severity_target,
             deg_embedding
         )
+
+        if save_samples and not samples_saved:
+            save_validation_samples(batch, restored, config, epoch)
+            samples_saved = True
         
         total_loss += total_batch_loss.item()
         for key in loss_components:
@@ -238,7 +266,7 @@ def train(config, debug=False, resume_from=None):
         
         # Validate every VAL_INTERVAL batches or at epoch end
         if epoch % max(1, config.EPOCHS // 5) == 0 or epoch == config.EPOCHS:
-            val_loss, val_losses = validate(model, val_loader, loss_fn, device, config)
+            val_loss, val_losses = validate(model, val_loader, loss_fn, device, config, epoch=epoch)
             
             print(f"\nTrain Loss: {train_loss:.6f}")
             print(f"Val Loss: {val_loss:.6f}")
