@@ -117,8 +117,8 @@ class DegradationPipeline:
         r2 = grid_x * grid_x + grid_y * grid_y
         radial = 1.0 + k1 * r2 + k2 * r2 * r2
 
-        map_x = (grid_x * radial) * fx + cx
-        map_y = (grid_y * radial) * fy + cy
+        map_x = ((grid_x * radial) * fx + cx).astype(np.float32)
+        map_y = ((grid_y * radial) * fy + cy).astype(np.float32)
 
         warped = cv2.remap(image, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
         return warped, "lens_distortion"
