@@ -12,10 +12,10 @@ class Config:
     ATTENTION_REDUCTION = 16
 
     # NAFNet backbone (stronger model)
-    NAFNET_WIDTH = 64
-    NAFNET_ENC_BLOCKS = [2, 2, 4, 8]
+    NAFNET_WIDTH = 48
+    NAFNET_ENC_BLOCKS = [2, 2, 2, 4]
     NAFNET_DEC_BLOCKS = [2, 2, 2, 2]
-    NAFNET_MIDDLE_BLOCKS = 12
+    NAFNET_MIDDLE_BLOCKS = 8
     
     # Degradation estimator
     DEGRADATION_TYPES = [
@@ -45,7 +45,7 @@ class Config:
     
     # Image processing
     PATCH_SIZE = 512
-    BATCH_SIZE = 1
+    BATCH_SIZE = 2
     NUM_WORKERS = 4
     
     # Degradation pipeline
