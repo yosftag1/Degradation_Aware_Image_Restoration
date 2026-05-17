@@ -1,19 +1,19 @@
 """Models package."""
 
 from .architecture import (
-    ChannelAttention,
-    NAFNetBlock,
-    Encoder,
-    Decoder,
+    LayerNorm2d,
+    SimpleGate,
+    NAFBlock,
+    NAFNetBackbone,
     DegradationEstimator,
     DegradationAwareRestoration,
 )
 
 __all__ = [
-    "ChannelAttention",
-    "NAFNetBlock",
-    "Encoder",
-    "Decoder",
+    "LayerNorm2d",
+    "SimpleGate",
+    "NAFBlock",
+    "NAFNetBackbone",
     "DegradationEstimator",
     "DegradationAwareRestoration",
 ]
