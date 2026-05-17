@@ -18,6 +18,9 @@ class Config:
         "jpeg_compression",
         "color_degradation",
         "exposure_issue",
+        "lens_distortion",
+        "downsample_upsample",
+        "defocus_blur",
     ]
     DEGRADATION_EMBEDDING_DIM = 16
     SEVERITY_LEVELS = 5
@@ -40,16 +43,40 @@ class Config:
     NUM_WORKERS = 4
     
     # Degradation pipeline
-    GAUSSIAN_NOISE_RANGE = (0.02, 0.18)
-    MOTION_BLUR_KERNEL_RANGE = (3, 25)
+    GAUSSIAN_NOISE_STD_RANGE = (10.0, 70.0)
+    MOTION_BLUR_KERNEL_RANGE = (7, 35)
     MOTION_BLUR_ANGLE_RANGE = (0, 180)
-    JPEG_QUALITY_RANGE = (5, 60)
-    COLOR_SHIFT_RANGE = (0.0, 0.4)
-    SATURATION_LOSS_RANGE = (0.0, 0.7)
-    HUE_SHIFT_RANGE = (0, 30)
-    BRIGHTNESS_RANGE = (0.0, 0.5)
-    CONTRAST_RANGE = (0.3, 1.8)
-    GAMMA_RANGE = (0.5, 2.0)
+    JPEG_QUALITY_RANGE = (3, 45)
+    JPEG_MAX_SEVERITY_STEP = 3
+    COLOR_SHIFT_MAX = 0.8
+    SATURATION_LOSS_MAX = 0.9
+    HUE_SHIFT_MAX = 45
+    BRIGHTNESS_MAX = 0.7
+    CONTRAST_MAX = 0.9
+    GAMMA_RANGE = (0.4, 2.4)
+    DOWNSAMPLE_SCALE_RANGE = (0.08, 0.8)
+    DEFOCUS_KERNEL_RANGE = (5, 45)
+    LENS_DISTORTION_K1_MAX = 0.7
+    LENS_DISTORTION_K2_MAX = 0.3
+
+    DEGRADATION_SEVERITY_BOOSTS = {
+        "gaussian_noise": 1.8,
+        "motion_blur": 1.4,
+        "jpeg_compression": 1.0,
+        "color_degradation": 1.5,
+        "exposure_issue": 1.0,
+        "lens_distortion": 1.6,
+        "downsample_upsample": 1.5,
+        "defocus_blur": 1.4,
+    }
+    DEGRADATION_MIN_SEVERITY = {
+        "gaussian_noise": 0.7,
+        "motion_blur": 0.6,
+        "color_degradation": 0.65,
+        "lens_distortion": 0.6,
+        "downsample_upsample": 0.6,
+        "defocus_blur": 0.6,
+    }
     
     # Training
     LEARNING_RATE = 1e-3
@@ -72,6 +99,10 @@ class Config:
     VAL_INTERVAL = 500
     VAL_EPOCH_INTERVAL = 1
     SEED = 42
+
+    # Evaluation image saving
+    EVAL_IMAGE_COUNT = 12
+    EVAL_SEVERITY_STEPS = 3
     
 
 class DebugConfig(Config):

@@ -9,12 +9,11 @@ import random
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torchvision.utils import make_grid, save_image
 from tqdm import tqdm
 import json
 from datetime import datetime
 import numpy as np
-from PIL import Image, ImageDraw
+import cv2
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
@@ -23,7 +22,7 @@ if PROJECT_ROOT not in sys.path:
 from config import Config, DebugConfig
 from models.architecture import DegradationAwareRestoration
 from losses.loss_functions import RestorationLoss
-from data.dataset import create_div2k_dataset
+from data.dataset import create_div2k_dataset, DegradationPipeline
 
 
 def set_seed(seed):
@@ -69,35 +68,61 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def save_validation_samples(batch, restored, config, epoch):
-    """Save a few validation samples (degraded | restored | clean)."""
-    max_samples = max(1, config.VAL_SAMPLE_COUNT)
-    degraded = batch['degraded'][:max_samples].detach().cpu()
-    clean = batch['clean'][:max_samples].detach().cpu()
-    restored = restored[:max_samples].detach().cpu()
+def _load_clean_image(image_path, config):
+    """Load and center-crop an image for consistent evaluation."""
+    image = cv2.imread(image_path)
+    if image is None:
+        raise FileNotFoundError(f"Image not found: {image_path}")
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    h, w = image.shape[:2]
+    size = min(h, w, config.PATCH_SIZE)
+    y = (h - size) // 2
+    x = (w - size) // 2
+    return image[y:y + size, x:x + size]
 
-    out_dir = os.path.join(config.OUTPUT_DIR, "val_samples", f"epoch_{epoch:03d}")
+
+@torch.no_grad()
+def save_validation_samples(model, device, config, val_dataset, eval_indices, epoch):
+    """Save a consistent evaluation set for each degradation and severity."""
+    out_dir = os.path.join(config.OUTPUT_DIR, "val_fixed", f"epoch_{epoch:03d}")
     os.makedirs(out_dir, exist_ok=True)
 
-    for idx in range(degraded.size(0)):
-        triplet = torch.stack([degraded[idx], restored[idx], clean[idx]], dim=0)
-        grid = make_grid(triplet, nrow=3, padding=2)
-        grid = grid.clamp(0, 1)
-        grid_img = (grid * 255).byte().permute(1, 2, 0).numpy()
+    pipeline = DegradationPipeline(config)
+    min_severity = getattr(config, "MIN_SEVERITY", 0.2)
+    steps = max(1, int(config.EVAL_SEVERITY_STEPS))
+    severities = np.linspace(min_severity, 1.0, steps)
 
-        pil_img = Image.fromarray(grid_img)
-        draw = ImageDraw.Draw(pil_img)
-        labels = ["degraded", "restored", "clean"]
-        cell_w = degraded.shape[-1]
-        padding = 2
-        for col, label in enumerate(labels):
-            x = padding + col * (cell_w + padding) + 4
-            y = 4
-            draw.text((x + 1, y + 1), label, fill=(0, 0, 0))
-            draw.text((x, y), label, fill=(255, 255, 255))
+    for local_idx, img_idx in enumerate(eval_indices):
+        image_path = val_dataset.image_paths[img_idx]
+        clean_image = _load_clean_image(image_path, config)
 
-        save_path = os.path.join(out_dir, f"sample_{idx:02d}.png")
-        pil_img.save(save_path)
+        image_tag = f"img_{local_idx:02d}"
+        image_dir = os.path.join(out_dir, image_tag)
+        os.makedirs(image_dir, exist_ok=True)
+
+        clean_path = os.path.join(image_dir, "clean.png")
+        cv2.imwrite(clean_path, cv2.cvtColor(clean_image, cv2.COLOR_RGB2BGR))
+
+        for deg_name in config.DEGRADATION_TYPES:
+            for step_idx, severity in enumerate(severities, start=1):
+                degraded = pipeline.apply_named_degradation(clean_image, deg_name, float(severity))
+                degraded_tensor = (
+                    torch.from_numpy(degraded.astype(np.float32) / 255.0)
+                    .permute(2, 0, 1)
+                    .unsqueeze(0)
+                    .to(device)
+                )
+
+                restored, _, _, _ = model(degraded_tensor)
+                restored_np = (
+                    restored[0].permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255
+                ).astype(np.uint8)
+
+                base_name = f"{deg_name}_s{step_idx:02d}"
+                degraded_path = os.path.join(image_dir, f"{base_name}_degraded.png")
+                restored_path = os.path.join(image_dir, f"{base_name}_restored.png")
+                cv2.imwrite(degraded_path, cv2.cvtColor(degraded, cv2.COLOR_RGB2BGR))
+                cv2.imwrite(restored_path, cv2.cvtColor(restored_np, cv2.COLOR_RGB2BGR))
 
 
 def train_epoch(model, train_loader, loss_fn, optimizer, device, config, epoch):
@@ -154,7 +179,7 @@ def train_epoch(model, train_loader, loss_fn, optimizer, device, config, epoch):
 
 
 @torch.no_grad()
-def validate(model, val_loader, loss_fn, device, config, epoch=None):
+def validate(model, val_loader, loss_fn, device, config, val_dataset, eval_indices, epoch=None):
     """Validate model."""
     model.eval()
     total_loss = 0.0
@@ -188,7 +213,7 @@ def validate(model, val_loader, loss_fn, device, config, epoch=None):
         )
 
         if save_samples and not samples_saved:
-            save_validation_samples(batch, restored, config, epoch)
+            save_validation_samples(model, device, config, val_dataset, eval_indices, epoch)
             samples_saved = True
         
         total_loss += total_batch_loss.item()
@@ -252,6 +277,10 @@ def train(config, debug=False, resume_from=None):
         num_workers=config.NUM_WORKERS,
         pin_memory=True,
     )
+
+    eval_count = min(len(val_dataset), max(1, int(config.EVAL_IMAGE_COUNT)))
+    rng = random.Random(config.SEED)
+    eval_indices = rng.sample(range(len(val_dataset)), eval_count)
     
     print(f"Train set: {len(train_dataset)} images")
     print(f"Val set: {len(val_dataset)} images")
@@ -284,7 +313,9 @@ def train(config, debug=False, resume_from=None):
         
         # Validate every N epochs (configurable) or at epoch end
         if epoch % max(1, config.VAL_EPOCH_INTERVAL) == 0 or epoch == config.EPOCHS:
-            val_loss, val_losses = validate(model, val_loader, loss_fn, device, config, epoch=epoch)
+            val_loss, val_losses = validate(
+                model, val_loader, loss_fn, device, config, val_dataset, eval_indices, epoch=epoch
+            )
             
             print(f"\nTrain Loss: {train_loss:.6f}")
             print(f"Val Loss: {val_loss:.6f}")
