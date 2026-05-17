@@ -92,7 +92,7 @@ def apply_exposure_issue(image, severity, max_brightness=0.7, max_contrast=0.9, 
     return degraded
 
 
-def apply_defocus_blur(image, severity, min_ksize=5, max_ksize=45):
+def apply_defocus_blur(image, severity, min_ksize=3, max_ksize=21):
     """Apply stronger Gaussian defocus blur."""
     ksize = int(min_ksize + severity * (max_ksize - min_ksize))
     ksize = ksize if ksize % 2 == 1 else ksize + 1
@@ -100,14 +100,14 @@ def apply_defocus_blur(image, severity, min_ksize=5, max_ksize=45):
     return blurred
 
 
-def apply_down_up_sample(image, severity, min_scale=0.08, max_scale=0.8):
+def apply_down_up_sample(image, severity, min_scale=0.2, max_scale=0.95):
     """Downsample then upsample to simulate resolution loss."""
     h, w = image.shape[:2]
     scale = max_scale - severity * (max_scale - min_scale)
     new_w = max(4, int(w * scale))
     new_h = max(4, int(h * scale))
     down = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
-    up = cv2.resize(down, (w, h), interpolation=cv2.INTER_NEAREST)
+    up = cv2.resize(down, (w, h), interpolation=cv2.INTER_CUBIC)
     return up
 
 
@@ -180,8 +180,8 @@ def main():
         "color_degradation": (1.5, 0.65),
         "exposure_issue": (1.0, None),
         "lens_distortion": (1.6, 0.6),
-        "downsample_upsample": (1.5, 0.6),
-        "defocus_blur": (1.4, 0.6),
+        "downsample_upsample": (1.3, 0.3),
+        "defocus_blur": (1.2, 0.3),
     }
 
     max_severity_caps = {

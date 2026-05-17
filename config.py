@@ -8,8 +8,14 @@ class Config:
     INPUT_CHANNELS = 3
     OUTPUT_CHANNELS = 3
     BASE_CHANNELS = 32
-    NUM_BLOCKS = 4  # Lightweight: 4 blocks instead of full NAFNet
+    NUM_BLOCKS = 4  # Legacy lightweight setting
     ATTENTION_REDUCTION = 16
+
+    # NAFNet backbone (stronger model)
+    NAFNET_WIDTH = 64
+    NAFNET_ENC_BLOCKS = [2, 2, 4, 8]
+    NAFNET_DEC_BLOCKS = [2, 2, 2, 2]
+    NAFNET_MIDDLE_BLOCKS = 12
     
     # Degradation estimator
     DEGRADATION_TYPES = [
@@ -38,7 +44,7 @@ class Config:
     VAL_SAMPLE_COUNT = 10      # Number of validation samples to save
     
     # Image processing
-    PATCH_SIZE = 256
+    PATCH_SIZE = 512
     BATCH_SIZE = 4
     NUM_WORKERS = 4
     
@@ -54,8 +60,8 @@ class Config:
     BRIGHTNESS_MAX = 0.7
     CONTRAST_MAX = 0.9
     GAMMA_RANGE = (0.4, 2.4)
-    DOWNSAMPLE_SCALE_RANGE = (0.08, 0.8)
-    DEFOCUS_KERNEL_RANGE = (5, 45)
+    DOWNSAMPLE_SCALE_RANGE = (0.2, 0.95)
+    DEFOCUS_KERNEL_RANGE = (3, 21)
     LENS_DISTORTION_K1_MAX = 0.7
     LENS_DISTORTION_K2_MAX = 0.3
 
@@ -74,8 +80,8 @@ class Config:
         "motion_blur": 0.6,
         "color_degradation": 0.65,
         "lens_distortion": 0.6,
-        "downsample_upsample": 0.6,
-        "defocus_blur": 0.6,
+        "downsample_upsample": 0.3,
+        "defocus_blur": 0.3,
     }
     
     # Training

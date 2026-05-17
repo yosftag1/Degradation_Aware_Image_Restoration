@@ -131,7 +131,7 @@ class DegradationPipeline:
         new_w = max(4, int(w * scale))
         new_h = max(4, int(h * scale))
         down = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        up = cv2.resize(down, (w, h), interpolation=cv2.INTER_NEAREST)
+        up = cv2.resize(down, (w, h), interpolation=cv2.INTER_CUBIC)
         return up, "downsample_upsample"
 
     def apply_defocus_blur(self, image, severity):
