@@ -44,7 +44,7 @@ class Config:
     VAL_SAMPLE_COUNT = 10      # Number of validation samples to save
     
     # Image processing
-    PATCH_SIZE = 512
+    PATCH_SIZE = 256
     BATCH_SIZE = 2
     NUM_WORKERS = 4
     
