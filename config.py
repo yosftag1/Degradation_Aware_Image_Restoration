@@ -45,7 +45,7 @@ class Config:
     
     # Image processing
     PATCH_SIZE = 512
-    BATCH_SIZE = 4
+    BATCH_SIZE = 1
     NUM_WORKERS = 4
     
     # Degradation pipeline
@@ -114,7 +114,7 @@ class Config:
 class DebugConfig(Config):
     """Debug configuration with smaller dataset and faster training."""
     EPOCHS = 3
-    BATCH_SIZE = 2
+    BATCH_SIZE = 1
     TRAIN_IMAGES_COUNT = 10
     VAL_IMAGES_COUNT = 2
     LOG_INTERVAL = 5
