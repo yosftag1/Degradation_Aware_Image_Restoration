@@ -83,10 +83,10 @@ class FrequencyLoss(nn.Module):
         self.loss_fn = nn.L1Loss()
     
     def forward(self, x, y):
-        """Compute frequency loss between x and y."""
-        # Convert to grayscale for frequency analysis
-        x_gray = x.mean(dim=1, keepdim=True)  # [B, 1, H, W]
-        y_gray = y.mean(dim=1, keepdim=True)
+        """Compute frequency loss between x and y (cast to float32 for cuFFT stability under AMP)."""
+        # Convert to float32 grayscale for frequency analysis
+        x_gray = x.float().mean(dim=1, keepdim=True)  # [B, 1, H, W]
+        y_gray = y.float().mean(dim=1, keepdim=True)
         
         # Compute FFT
         x_fft = torch.fft.rfft2(x_gray.squeeze(1))  # [B, H, W//2+1]

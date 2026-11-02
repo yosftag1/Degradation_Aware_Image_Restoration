@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, '/kaggle/working/Degradation_Aware_Image_Restoration')
 
 import random
+import subprocess
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -14,6 +15,13 @@ import json
 from datetime import datetime
 import numpy as np
 import cv2
+
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    _HAS_PYNVML = True
+except Exception:
+    _HAS_PYNVML = False
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
@@ -32,19 +40,134 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
+def unwrap_model(model):
+    """Return underlying model if wrapped in DataParallel."""
+    return model.module if isinstance(model, torch.nn.DataParallel) else model
+
+
+def get_gpu_stats(use_smi_fallback=False):
+    """Collect compute utilization (%) and VRAM usage for all CUDA GPUs."""
+    if not torch.cuda.is_available():
+        return []
+
+    num_gpus = torch.cuda.device_count()
+    smi_map = {}
+
+    if _HAS_PYNVML:
+        for i in range(num_gpus):
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                smi_map[i] = (int(util), mem_info.used / (1024 ** 3), mem_info.total / (1024 ** 3))
+            except Exception:
+                pass
+    elif use_smi_fallback:
+        try:
+            out = subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=index,utilization.gpu,memory.used,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+                timeout=2.0,
+            )
+            for line in out.strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) == 4:
+                    idx = int(parts[0])
+                    smi_map[idx] = (int(parts[1]), float(parts[2]) / 1024.0, float(parts[3]) / 1024.0)
+        except Exception:
+            pass
+
+    stats = []
+    for i in range(num_gpus):
+        props = torch.cuda.get_device_properties(i)
+        total_gb = props.total_memory / (1024 ** 3)
+        alloc_gb = torch.cuda.memory_allocated(i) / (1024 ** 3)
+        reserved_gb = torch.cuda.memory_reserved(i) / (1024 ** 3)
+        peak_gb = torch.cuda.max_memory_allocated(i) / (1024 ** 3)
+        util_pct, smi_used_gb, _ = smi_map.get(i, (None, reserved_gb, total_gb))
+        used_gb = max(reserved_gb, smi_used_gb)
+        mem_pct = (used_gb / total_gb * 100.0) if total_gb > 0 else 0.0
+        stats.append({
+            "index": i,
+            "name": props.name,
+            "util_pct": util_pct,
+            "alloc_gb": alloc_gb,
+            "used_gb": used_gb,
+            "peak_gb": peak_gb,
+            "total_gb": total_gb,
+            "mem_pct": mem_pct,
+        })
+    return stats
+
+
+def print_gpu_usage(stage_label="GPU Status"):
+    """Print a detailed table of GPU compute utilization and VRAM usage across all GPUs."""
+    stats = get_gpu_stats(use_smi_fallback=True)
+    if not stats:
+        print(f"[{stage_label}] Running on CPU (no CUDA GPUs detected).")
+        return
+
+    print(f"\n┌─ {stage_label} {'─' * max(1, 68 - len(stage_label))}┐")
+    for s in stats:
+        util_str = f"{s['util_pct']:3d}%" if s["util_pct"] is not None else "N/A "
+        print(
+            f"│ GPU {s['index']} ({s['name'][:18]:<18}) | "
+            f"Compute Util: {util_str} | "
+            f"VRAM: {s['used_gb']:.2f}/{s['total_gb']:.1f} GB ({s['mem_pct']:4.1f}%) | "
+            f"PeakTorch: {s['peak_gb']:.2f} GB │"
+        )
+    print(f"└{'─' * 72}┘")
+
+
+def format_gpu_postfix():
+    """Compact string for live tqdm progress bar showing all GPUs."""
+    stats = get_gpu_stats(use_smi_fallback=False)
+    if not stats:
+        return "CPU"
+    parts = []
+    for s in stats:
+        util_str = f"{s['util_pct']}%" if s["util_pct"] is not None else f"{s['mem_pct']:.0f}%mem"
+        parts.append(f"G{s['index']}:{util_str}({s['used_gb']:.1f}/{s['total_gb']:.0f}G)")
+    return " ".join(parts)
+
+
 def setup_training(config, debug=False):
-    """Setup training environment."""
+    """Setup training environment with multi-GPU DataParallel and AMP support."""
     device = torch.device(config.DEVICE if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    num_gpus = torch.cuda.device_count() if device.type == "cuda" else 0
+    use_multi_gpu = getattr(config, "MULTI_GPU", True) and num_gpus > 1
+    use_amp = getattr(config, "USE_AMP", True) and (device.type == "cuda")
+
+    # If only 1 GPU is present and user didn't explicitly override batch size, scale neatly
+    if num_gpus == 1 and config.BATCH_SIZE >= 16 and not debug:
+        config.BATCH_SIZE = 8
+
+    print(f"Using device: {device} (detected {num_gpus} CUDA GPU(s))")
     
     # Create model
     model = DegradationAwareRestoration(config).to(device)
     print(f"Model created with {count_parameters(model):,} parameters")
+
+    if use_multi_gpu:
+        device_ids = list(range(num_gpus))
+        model = torch.nn.DataParallel(model, device_ids=device_ids)
+        print(
+            f"✓ Multi-GPU DataParallel ENABLED across {num_gpus} GPUs {device_ids} "
+            f"(total batch_size={config.BATCH_SIZE}, {config.BATCH_SIZE // num_gpus} per GPU)"
+        )
+    else:
+        print(f"Single-device mode (batch_size={config.BATCH_SIZE})")
+
     print(
         f"Bridge mode: {config.BRIDGE_TYPE} | "
         f"steps={config.BRIDGE_STEPS} | "
         f"sigma_max={config.BRIDGE_SIGMA_MAX} | "
-        f"ot_ode={config.BRIDGE_OT_ODE}"
+        f"ot_ode={config.BRIDGE_OT_ODE} | "
+        f"AMP (FP16 Tensor Cores)={'ENABLED' if use_amp else 'DISABLED'}"
     )
     
     # Create loss function
@@ -65,8 +188,11 @@ def setup_training(config, debug=False):
         T_mult=1,
         eta_min=1e-6,
     )
+
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if device.type == "cuda" else None
+    print_gpu_usage("Pre-Training GPU & VRAM Check")
     
-    return model, loss_fn, optimizer, scheduler, device
+    return model, loss_fn, optimizer, scheduler, scaler, device
 
 
 def count_parameters(model):
@@ -93,6 +219,8 @@ def save_validation_samples(model, device, config, val_dataset, eval_indices, ep
     out_dir = os.path.join(config.OUTPUT_DIR, "val_fixed", f"epoch_{epoch:03d}")
     os.makedirs(out_dir, exist_ok=True)
 
+    raw_model = unwrap_model(model)
+    use_amp = getattr(config, "USE_AMP", True) and (device.type == "cuda")
     pipeline = DegradationPipeline(config)
     min_severity = getattr(config, "MIN_SEVERITY", 0.2)
     steps = max(1, int(config.EVAL_SEVERITY_STEPS))
@@ -120,9 +248,10 @@ def save_validation_samples(model, device, config, val_dataset, eval_indices, ep
                 .permute(0, 3, 1, 2)
                 .to(device)
             )
-            restored_batch, _, _, _ = model(degraded_batch)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                restored_batch, _, _, _ = raw_model(degraded_batch)
             restored_batch_np = (
-                restored_batch.permute(0, 2, 3, 1).clamp(0, 1).cpu().numpy() * 255
+                restored_batch.float().permute(0, 2, 3, 1).clamp(0, 1).cpu().numpy() * 255
             ).astype(np.uint8)
 
             for step_idx, (degraded, restored_np) in enumerate(
@@ -135,9 +264,10 @@ def save_validation_samples(model, device, config, val_dataset, eval_indices, ep
                 cv2.imwrite(restored_path, cv2.cvtColor(restored_np, cv2.COLOR_RGB2BGR))
 
 
-def train_epoch(model, train_loader, loss_fn, optimizer, device, config, epoch):
-    """Train for one epoch."""
+def train_epoch(model, train_loader, loss_fn, optimizer, scaler, device, config, epoch):
+    """Train for one epoch with multi-GPU DataParallel, AMP, and live GPU usage reporting."""
     model.train()
+    use_amp = getattr(config, "USE_AMP", True) and (device.type == "cuda")
     total_loss = 0.0
     loss_components = {
         'l1': 0.0, 'perceptual': 0.0, 'frequency': 0.0,
@@ -147,38 +277,54 @@ def train_epoch(model, train_loader, loss_fn, optimizer, device, config, epoch):
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
     
     for batch_idx, batch in enumerate(pbar):
-        degraded = batch['degraded'].to(device)
-        clean = batch['clean'].to(device)
-        deg_type_target = batch['deg_type'].to(device)
-        severity_target = batch['severity'].to(device)
+        degraded = batch['degraded'].to(device, non_blocking=True)
+        clean = batch['clean'].to(device, non_blocking=True)
+        deg_type_target = batch['deg_type'].to(device, non_blocking=True)
+        severity_target = batch['severity'].to(device, non_blocking=True)
         
-        # Forward pass (bridge training step: sample random t, construct x_t, predict clean x_0)
-        restored, deg_type, severity, deg_embedding = model(degraded, clean=clean)
+        optimizer.zero_grad(set_to_none=True)
+
+        # Forward pass under AMP (bridge training step: sample random t, construct x_t, predict clean x_0)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            restored, deg_type, severity, deg_embedding = model(degraded, clean)
+            total_batch_loss, loss_dict = loss_fn(
+                restored, clean,
+                deg_type, deg_type_target,
+                severity, severity_target,
+                deg_embedding
+            )
         
-        # Compute loss
-        total_batch_loss, loss_dict = loss_fn(
-            restored, clean,
-            deg_type, deg_type_target,
-            severity, severity_target,
-            deg_embedding
-        )
+        # Backward pass with GradScaler
+        if scaler is not None and use_amp:
+            scaler.scale(total_batch_loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            total_batch_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
         
-        # Backward pass
-        optimizer.zero_grad()
-        total_batch_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-        
+        # Print immediate GPU usage snapshot on the very first batch of Epoch 1
+        if epoch == 1 and batch_idx == 0:
+            print_gpu_usage("Live GPU Usage (Epoch 1, Batch 1 Active)")
+
         # Update metrics
         total_loss += total_batch_loss.item()
         for key in loss_components:
             loss_components[key] += loss_dict[key]
         
-        # Log every LOG_INTERVAL batches
-        if (batch_idx + 1) % config.LOG_INTERVAL == 0:
+        # Log every LOG_INTERVAL batches (or on batch 1) with live GPU utilization
+        if batch_idx == 0 or (batch_idx + 1) % config.LOG_INTERVAL == 0:
             avg_loss = total_loss / (batch_idx + 1)
-            pbar.set_postfix({'loss': f'{avg_loss:.4f}'})
+            pbar.set_postfix({
+                'loss': f'{avg_loss:.4f}',
+                'gpu': format_gpu_postfix(),
+            })
     
+    print_gpu_usage(f"End of Epoch {epoch} GPU Usage Summary")
+
     # Average metrics
     num_batches = len(train_loader)
     avg_loss = total_loss / num_batches
@@ -192,6 +338,7 @@ def train_epoch(model, train_loader, loss_fn, optimizer, device, config, epoch):
 def validate(model, val_loader, loss_fn, device, config, val_dataset, eval_indices, epoch=None):
     """Validate model."""
     model.eval()
+    use_amp = getattr(config, "USE_AMP", True) and (device.type == "cuda")
     total_loss = 0.0
     loss_components = {
         'l1': 0.0, 'perceptual': 0.0, 'frequency': 0.0,
@@ -206,21 +353,20 @@ def validate(model, val_loader, loss_fn, device, config, val_dataset, eval_indic
     samples_saved = False
     
     for batch in tqdm(val_loader, desc="Validation"):
-        degraded = batch['degraded'].to(device)
-        clean = batch['clean'].to(device)
-        deg_type_target = batch['deg_type'].to(device)
-        severity_target = batch['severity'].to(device)
+        degraded = batch['degraded'].to(device, non_blocking=True)
+        clean = batch['clean'].to(device, non_blocking=True)
+        deg_type_target = batch['deg_type'].to(device, non_blocking=True)
+        severity_target = batch['severity'].to(device, non_blocking=True)
         
         # Forward pass (multi-step reverse bridge sampling from t=1 -> t=0)
-        restored, deg_type, severity, deg_embedding = model(degraded)
-        
-        # Compute loss
-        total_batch_loss, loss_dict = loss_fn(
-            restored, clean,
-            deg_type, deg_type_target,
-            severity, severity_target,
-            deg_embedding
-        )
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            restored, deg_type, severity, deg_embedding = model(degraded)
+            total_batch_loss, loss_dict = loss_fn(
+                restored, clean,
+                deg_type, deg_type_target,
+                severity, severity_target,
+                deg_embedding
+            )
 
         if save_samples and not samples_saved:
             save_validation_samples(model, device, config, val_dataset, eval_indices, epoch)
@@ -239,7 +385,7 @@ def validate(model, val_loader, loss_fn, device, config, val_dataset, eval_indic
 
 
 def save_checkpoint(model, optimizer, scheduler, epoch, loss, config, is_best=False):
-    """Save model checkpoint."""
+    """Save model checkpoint (always unwrapped so single-GPU inference works seamlessly)."""
     os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
     
     if is_best:
@@ -247,9 +393,10 @@ def save_checkpoint(model, optimizer, scheduler, epoch, loss, config, is_best=Fa
     else:
         ckpt_path = os.path.join(config.CHECKPOINT_DIR, f"model_epoch_{epoch:03d}.pt")
     
+    raw_model = unwrap_model(model)
     checkpoint = {
         'epoch': epoch,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': raw_model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'loss': loss,
@@ -269,7 +416,7 @@ def train(config, debug=False, resume_from=None):
     """Main training loop."""
     set_seed(config.SEED)
     # Setup
-    model, loss_fn, optimizer, scheduler, device = setup_training(config, debug)
+    model, loss_fn, optimizer, scheduler, scaler, device = setup_training(config, debug)
     
     # Load datasets
     print("Loading datasets...")
@@ -308,7 +455,11 @@ def train(config, debug=False, resume_from=None):
     if resume_from and os.path.exists(resume_from):
         print(f"Resuming from {resume_from}")
         checkpoint = torch.load(resume_from, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        raw_state = checkpoint['model_state_dict']
+        # Strip 'module.' prefix if loading an older DataParallel checkpoint
+        if any(k.startswith("module.") for k in raw_state.keys()):
+            raw_state = {k.replace("module.", "", 1): v for k, v in raw_state.items()}
+        unwrap_model(model).load_state_dict(raw_state)
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
@@ -324,7 +475,7 @@ def train(config, debug=False, resume_from=None):
         
         # Train
         train_loss, train_losses = train_epoch(
-            model, train_loader, loss_fn, optimizer, device, config, epoch
+            model, train_loader, loss_fn, optimizer, scaler, device, config, epoch
         )
         
         # Validate every N epochs (configurable) or at epoch end

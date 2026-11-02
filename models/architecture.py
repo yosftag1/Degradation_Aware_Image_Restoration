@@ -27,9 +27,10 @@ class SinusoidalTimeEmbedding(nn.Module):
         """
         if t.dim() > 1:
             t = t.view(-1)
+        t = t.float()
         half_dim = self.dim // 2
         emb_scale = math.log(10000.0) / max(1, half_dim - 1)
-        freqs = torch.exp(torch.arange(half_dim, device=t.device, dtype=t.dtype) * -emb_scale)
+        freqs = torch.exp(torch.arange(half_dim, device=t.device, dtype=torch.float32) * -emb_scale)
         # Scale t in [0, 1] by 1000 for rich frequency coverage
         args = (t * 1000.0).unsqueeze(1) * freqs.unsqueeze(0)
         emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
@@ -118,10 +119,12 @@ class LayerNorm2d(nn.Module):
         self.eps = eps
 
     def forward(self, x):
-        mean = x.mean(dim=1, keepdim=True)
-        var = (x - mean).pow(2).mean(dim=1, keepdim=True)
-        x = (x - mean) / torch.sqrt(var + self.eps)
-        return x * self.weight + self.bias
+        orig_dtype = x.dtype
+        x_f = x.float()
+        mean = x_f.mean(dim=1, keepdim=True)
+        var = (x_f - mean).pow(2).mean(dim=1, keepdim=True)
+        x_norm = ((x_f - mean) / torch.sqrt(var + self.eps)).to(orig_dtype)
+        return x_norm * self.weight + self.bias
 
 
 class SimpleGate(nn.Module):

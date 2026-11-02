@@ -53,8 +53,10 @@ class Config:
     
     # Image processing
     PATCH_SIZE = 256
-    BATCH_SIZE = 2
+    BATCH_SIZE = 16             # 8 per T4 GPU on Kaggle T4 x2 (auto-scales if single GPU)
     NUM_WORKERS = 4
+    USE_AMP = True              # Mixed precision (FP16) for T4 Tensor Cores
+    MULTI_GPU = True            # Use all available GPUs via DataParallel (e.g. Kaggle T4 x2)
     
     # Degradation pipeline
     GAUSSIAN_NOISE_STD_RANGE = (10.0, 70.0)
