@@ -14,29 +14,43 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from config import Config
-from models.architecture import DegradationAwareRestoration
+from models.architecture import DegradationAwareRestoration, SchrodingerBridge
 from data.dataset import DegradationPipeline, ImageRestorationDataset
 from losses.loss_functions import RestorationLoss
 
 
 def test_model_forward_pass():
-    """Test model with dummy data."""
-    print("Testing model forward pass...")
+    """Test model and bridge forward/reverse passes with dummy data."""
+    print("Testing model & bridge forward/sampling passes...")
     
     config = Config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
+    # Verify bridge boundary conditions for all 3 modes
+    for mode in ("i2sb", "brownian", "flow"):
+        bridge = SchrodingerBridge(bridge_type=mode, sigma_max=0.25)
+        t_bounds = torch.tensor([0.0, 0.5, 1.0], device=device)
+        alpha_t, sigma_t = bridge.schedule(t_bounds)
+        assert torch.isclose(alpha_t[0], torch.tensor(0.0, device=device), atol=1e-6)
+        assert torch.isclose(alpha_t[2], torch.tensor(1.0, device=device), atol=1e-6)
+        assert torch.isclose(sigma_t[0], torch.tensor(0.0, device=device), atol=1e-6)
+        assert torch.isclose(sigma_t[2], torch.tensor(0.0, device=device), atol=1e-6)
+        print(f"✓ Bridge '{mode}' schedule @ t=[0, 0.5, 1]: alpha={alpha_t.tolist()}, sigma={[round(v, 4) for v in sigma_t.tolist()]}")
+
     model = DegradationAwareRestoration(config).to(device)
     model.eval()
     
-    # Dummy input
-    x = torch.randn(2, 3, 256, 256).to(device)
+    # Dummy input in [0, 1]
+    x_deg = torch.rand(2, 3, 256, 256, device=device)
+    x_clean = torch.rand(2, 3, 256, 256, device=device)
     
     with torch.no_grad():
-        restored, deg_type, severity, deg_embedding = model(x)
+        hat_x0, deg_type, severity, deg_embedding = model(x_deg, clean=x_clean)
+        restored, _, _, _, traj = model.sample(x_deg, steps=4, return_trajectory=True)
     
-    print(f"✓ Input shape: {x.shape}")
-    print(f"✓ Restored shape: {restored.shape}")
+    print(f"✓ Input shape: {x_deg.shape}")
+    print(f"✓ Bridge train prediction (hat_x0) shape: {hat_x0.shape}")
+    print(f"✓ Multi-step restored shape: {restored.shape} (trajectory length: {len(traj)})")
     print(f"✓ Deg type logits: {deg_type.shape}")
     print(f"✓ Severity logits: {severity.shape}")
     print(f"✓ Deg embedding: {deg_embedding.shape}")
@@ -76,12 +90,13 @@ def test_loss_functions():
     
     # Dummy data
     B, C, H, W = 2, 3, 256, 256
+    num_deg = len(config.DEGRADATION_TYPES)
     restored = torch.randn(B, C, H, W).clamp(0, 1).to(device)
     clean = torch.randn(B, C, H, W).clamp(0, 1).to(device)
-    deg_type = torch.randn(B, 3, device=device)
-    deg_type_target = torch.randint(0, 3, (B,), device=device)
-    severity = torch.randn(B, 5, device=device)
-    severity_target = torch.randint(0, 5, (B,), device=device)
+    deg_type = torch.randn(B, num_deg, device=device)
+    deg_type_target = torch.randint(0, num_deg, (B,), device=device)
+    severity = torch.randn(B, config.SEVERITY_LEVELS, device=device)
+    severity_target = torch.randint(0, config.SEVERITY_LEVELS, (B,), device=device)
     
     total_loss, loss_dict = loss_fn(
         restored, clean, deg_type, deg_type_target,
@@ -145,13 +160,14 @@ def test_model_training_step():
     
     # Dummy data
     B, C, H, W = 2, 3, 256, 256
+    num_deg = len(config.DEGRADATION_TYPES)
     degraded = torch.randn(B, C, H, W).clamp(0, 1).to(device)
     clean = torch.randn(B, C, H, W).clamp(0, 1).to(device)
-    deg_type_target = torch.randint(0, 3, (B,), device=device)
-    severity_target = torch.randint(0, 5, (B,), device=device)
+    deg_type_target = torch.randint(0, num_deg, (B,), device=device)
+    severity_target = torch.randint(0, config.SEVERITY_LEVELS, (B,), device=device)
     
-    # Forward pass
-    restored, deg_type, severity, deg_embedding = model(degraded)
+    # Forward pass (bridge training step)
+    restored, deg_type, severity, deg_embedding = model(degraded, clean=clean)
     
     # Compute loss
     total_loss, loss_dict = loss_fn(

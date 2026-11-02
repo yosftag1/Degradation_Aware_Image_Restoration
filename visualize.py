@@ -39,8 +39,8 @@ def visualize_degradation_types(output_dir="./visualizations"):
     
     fig, axes = plt.subplots(
         len(config.DEGRADATION_TYPES) + 1,
-        len(config.SEVERITY_LEVELS) + 1,
-        figsize=(14, 10)
+        len(pipeline.severity_levels) + 1,
+        figsize=(14, 14)
     )
     
     # Original image
@@ -54,25 +54,19 @@ def visualize_degradation_types(output_dir="./visualizations"):
                                    ha='center', va='center', fontsize=10, fontweight='bold')
         axes[deg_idx + 1, 0].axis('off')
         
-        for sev_idx, severity in enumerate(config.SEVERITY_LEVELS):
+        for sev_idx, severity in enumerate(pipeline.severity_levels):
             # Reset pipeline to apply specific degradation
             np.random.seed(42 + sev_idx)
             
-            degraded = test_image.copy()
-            if deg_type == "gaussian_noise":
-                degraded, _ = pipeline.apply_gaussian_noise(degraded, severity)
-            elif deg_type == "motion_blur":
-                degraded, _ = pipeline.apply_motion_blur(degraded, severity)
-            elif deg_type == "jpeg_compression":
-                degraded, _ = pipeline.apply_jpeg_compression(degraded, severity)
+            degraded = pipeline.apply_named_degradation(test_image.copy(), deg_type, float(severity))
             
             axes[deg_idx + 1, sev_idx + 1].imshow(degraded)
-            axes[deg_idx + 1, sev_idx + 1].set_title(f"{severity:.1f}", fontsize=9)
+            axes[deg_idx + 1, sev_idx + 1].set_title(f"{severity:.2f}", fontsize=9)
             axes[deg_idx + 1, sev_idx + 1].axis('off')
     
     # Add severity labels to top row
-    for sev_idx, severity in enumerate(config.SEVERITY_LEVELS):
-        axes[0, sev_idx + 1].text(0.5, 0.5, f"Severity\n{severity:.1f}",
+    for sev_idx, severity in enumerate(pipeline.severity_levels):
+        axes[0, sev_idx + 1].text(0.5, 0.5, f"Severity\n{severity:.2f}",
                                    ha='center', va='center', fontsize=9)
         axes[0, sev_idx + 1].axis('off')
     

@@ -40,6 +40,12 @@ def setup_training(config, debug=False):
     # Create model
     model = DegradationAwareRestoration(config).to(device)
     print(f"Model created with {count_parameters(model):,} parameters")
+    print(
+        f"Bridge mode: {config.BRIDGE_TYPE} | "
+        f"steps={config.BRIDGE_STEPS} | "
+        f"sigma_max={config.BRIDGE_SIGMA_MAX} | "
+        f"ot_ode={config.BRIDGE_OT_ODE}"
+    )
     
     # Create loss function
     loss_fn = RestorationLoss(config, device=device)
@@ -104,20 +110,24 @@ def save_validation_samples(model, device, config, val_dataset, eval_indices, ep
         cv2.imwrite(clean_path, cv2.cvtColor(clean_image, cv2.COLOR_RGB2BGR))
 
         for deg_name in config.DEGRADATION_TYPES:
-            for step_idx, severity in enumerate(severities, start=1):
+            degraded_list = []
+            for severity in severities:
                 degraded = pipeline.apply_named_degradation(clean_image, deg_name, float(severity))
-                degraded_tensor = (
-                    torch.from_numpy(degraded.astype(np.float32) / 255.0)
-                    .permute(2, 0, 1)
-                    .unsqueeze(0)
-                    .to(device)
-                )
+                degraded_list.append(degraded)
 
-                restored, _, _, _ = model(degraded_tensor)
-                restored_np = (
-                    restored[0].permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255
-                ).astype(np.uint8)
+            degraded_batch = (
+                torch.from_numpy(np.stack(degraded_list, axis=0).astype(np.float32) / 255.0)
+                .permute(0, 3, 1, 2)
+                .to(device)
+            )
+            restored_batch, _, _, _ = model(degraded_batch)
+            restored_batch_np = (
+                restored_batch.permute(0, 2, 3, 1).clamp(0, 1).cpu().numpy() * 255
+            ).astype(np.uint8)
 
+            for step_idx, (degraded, restored_np) in enumerate(
+                zip(degraded_list, restored_batch_np), start=1
+            ):
                 base_name = f"{deg_name}_s{step_idx:02d}"
                 degraded_path = os.path.join(image_dir, f"{base_name}_degraded.png")
                 restored_path = os.path.join(image_dir, f"{base_name}_restored.png")
@@ -142,8 +152,8 @@ def train_epoch(model, train_loader, loss_fn, optimizer, device, config, epoch):
         deg_type_target = batch['deg_type'].to(device)
         severity_target = batch['severity'].to(device)
         
-        # Forward pass
-        restored, deg_type, severity, deg_embedding = model(degraded)
+        # Forward pass (bridge training step: sample random t, construct x_t, predict clean x_0)
+        restored, deg_type, severity, deg_embedding = model(degraded, clean=clean)
         
         # Compute loss
         total_batch_loss, loss_dict = loss_fn(
@@ -201,7 +211,7 @@ def validate(model, val_loader, loss_fn, device, config, val_dataset, eval_indic
         deg_type_target = batch['deg_type'].to(device)
         severity_target = batch['severity'].to(device)
         
-        # Forward pass
+        # Forward pass (multi-step reverse bridge sampling from t=1 -> t=0)
         restored, deg_type, severity, deg_embedding = model(degraded)
         
         # Compute loss
@@ -243,6 +253,12 @@ def save_checkpoint(model, optimizer, scheduler, epoch, loss, config, is_best=Fa
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'loss': loss,
+        'bridge_config': {
+            'bridge_type': config.BRIDGE_TYPE,
+            'bridge_steps': config.BRIDGE_STEPS,
+            'sigma_max': config.BRIDGE_SIGMA_MAX,
+            'ot_ode': config.BRIDGE_OT_ODE,
+        },
     }
     
     torch.save(checkpoint, ckpt_path)
@@ -374,6 +390,16 @@ if __name__ == "__main__":
     parser.add_argument("--log-dir", type=str, default=None, help="Override log directory")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
     parser.add_argument("--num-workers", type=int, default=None, help="Override dataloader workers")
+    parser.add_argument(
+        "--bridge-type",
+        type=str,
+        choices=["i2sb", "brownian", "flow"],
+        default=None,
+        help="Bridge formulation to use (i2sb, brownian, or flow)",
+    )
+    parser.add_argument("--bridge-steps", type=int, default=None, help="Number of reverse bridge steps")
+    parser.add_argument("--sigma-max", type=float, default=None, help="Peak noise bubble std for bridge")
+    parser.add_argument("--ot-ode", action="store_true", help="Use deterministic OT-ODE bridge sampler")
     
     args = parser.parse_args()
     
@@ -394,5 +420,13 @@ if __name__ == "__main__":
         config.BATCH_SIZE = args.batch_size
     if args.num_workers is not None:
         config.NUM_WORKERS = args.num_workers
+    if args.bridge_type is not None:
+        config.BRIDGE_TYPE = args.bridge_type
+    if args.bridge_steps is not None:
+        config.BRIDGE_STEPS = args.bridge_steps
+    if args.sigma_max is not None:
+        config.BRIDGE_SIGMA_MAX = args.sigma_max
+    if args.ot_ode:
+        config.BRIDGE_OT_ODE = True
 
     train(config, debug=args.debug, resume_from=args.resume)

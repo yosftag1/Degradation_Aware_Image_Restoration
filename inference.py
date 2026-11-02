@@ -27,23 +27,33 @@ class Inferencer:
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.config = config or Config()
         
+        # Load checkpoint and sync bridge settings if stored in checkpoint
+        checkpoint = torch.load(model_path, map_location=self.device)
+        if 'bridge_config' in checkpoint:
+            bcfg = checkpoint['bridge_config']
+            self.config.BRIDGE_TYPE = bcfg.get('bridge_type', self.config.BRIDGE_TYPE)
+            self.config.BRIDGE_STEPS = bcfg.get('bridge_steps', self.config.BRIDGE_STEPS)
+            self.config.BRIDGE_SIGMA_MAX = bcfg.get('sigma_max', self.config.BRIDGE_SIGMA_MAX)
+            self.config.BRIDGE_OT_ODE = bcfg.get('ot_ode', self.config.BRIDGE_OT_ODE)
+
         # Load model
         self.model = DegradationAwareRestoration(self.config).to(self.device)
-        
-        checkpoint = torch.load(model_path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model.eval()
         
-        print(f"Model loaded from {model_path}")
+        print(f"Model loaded from {model_path} (bridge={self.config.BRIDGE_TYPE}, steps={self.config.BRIDGE_STEPS})")
         print(f"Using device: {self.device}")
     
     @torch.no_grad()
-    def restore(self, image_path, return_degradation_info=False):
-        """Restore a single image.
+    def restore(self, image_path, return_degradation_info=False, steps=None, ot_ode=None, return_trajectory=False):
+        """Restore a single image using the reverse bridge sampler.
         
         Args:
             image_path: Path to degraded image
             return_degradation_info: If True, also return degradation predictions
+            steps: Optional override for number of reverse bridge steps
+            ot_ode: Optional override for deterministic OT-ODE sampling
+            return_trajectory: If True, also return list of intermediate bridge states (uint8 RGB)
         
         Returns:
             restored_image: Restored image (numpy array, 0-255, uint8)
@@ -60,8 +70,20 @@ class Inferencer:
         image_tensor = torch.from_numpy(image.astype(np.float32) / 255.0).permute(2, 0, 1).unsqueeze(0)
         image_tensor = image_tensor.to(self.device)
         
-        # Inference
-        restored, deg_type, severity, deg_embedding = self.model(image_tensor)
+        # Inference across the bridge (t=1 -> t=0)
+        if return_trajectory:
+            restored, deg_type, severity, deg_embedding, trajectory = self.model.sample(
+                image_tensor, steps=steps, ot_ode=ot_ode, return_trajectory=True
+            )
+            traj_np = [
+                (frame[0].permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+                for frame in trajectory
+            ]
+        else:
+            restored, deg_type, severity, deg_embedding = self.model(
+                image_tensor, steps=steps, ot_ode=ot_ode
+            )
+            traj_np = None
         
         # Convert back to numpy
         restored_np = (restored[0].permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
@@ -74,10 +96,15 @@ class Inferencer:
                 'type': self.config.DEGRADATION_TYPES[deg_type_pred],
                 'severity_level': severity_pred,
                 'severity_value': (severity_pred + 1) * 0.2,  # 0.2 to 1.0
+                'bridge_type': self.model.bridge.bridge_type,
+                'bridge_steps': steps or self.model.default_steps,
             }
-            
+            if return_trajectory:
+                return restored_np, degradation_info, traj_np
             return restored_np, degradation_info
         
+        if return_trajectory:
+            return restored_np, traj_np
         return restored_np
     
     @torch.no_grad()
@@ -204,19 +231,47 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default="./restored", help="Output directory")
     parser.add_argument("--eval", type=str, help="Evaluate restoration (provide clean image directory)")
     parser.add_argument("--eval-output", type=str, help="File to save evaluation results")
+    parser.add_argument("--steps", type=int, default=None, help="Number of reverse bridge steps (default from Config)")
+    parser.add_argument("--ot-ode", action="store_true", help="Use deterministic OT-ODE sampling instead of stochastic SDE")
+    parser.add_argument("--save-trajectory", action="store_true", help="Save intermediate bridge states (t=1 -> t=0)")
     
     args = parser.parse_args()
     
     inferencer = Inferencer(args.model)
+    ot_ode_flag = True if args.ot_ode else None
     
     if args.image:
         print(f"Restoring {args.image}...")
-        restored, deg_info = inferencer.restore(args.image, return_degradation_info=True)
+        if args.save_trajectory:
+            restored, deg_info, traj = inferencer.restore(
+                args.image,
+                return_degradation_info=True,
+                steps=args.steps,
+                ot_ode=ot_ode_flag,
+                return_trajectory=True,
+            )
+        else:
+            restored, deg_info = inferencer.restore(
+                args.image,
+                return_degradation_info=True,
+                steps=args.steps,
+                ot_ode=ot_ode_flag,
+            )
+            traj = None
         
         output_path = os.path.join(args.output_dir, os.path.basename(args.image))
         os.makedirs(args.output_dir, exist_ok=True)
         restored_bgr = cv2.cvtColor(restored, cv2.COLOR_RGB2BGR)
         cv2.imwrite(output_path, restored_bgr)
+        
+        if traj is not None:
+            stem = os.path.splitext(os.path.basename(args.image))[0]
+            traj_dir = os.path.join(args.output_dir, f"{stem}_bridge_trajectory")
+            os.makedirs(traj_dir, exist_ok=True)
+            for idx, frame in enumerate(traj):
+                frame_path = os.path.join(traj_dir, f"step_{idx:02d}.png")
+                cv2.imwrite(frame_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            print(f"Bridge trajectory ({len(traj)} states) saved to {traj_dir}")
         
         print(f"Restored image saved to {output_path}")
         print(f"Degradation info: {deg_info}")
