@@ -117,7 +117,7 @@ class Config:
     SEED = 42
 
     # Evaluation image saving
-    EVAL_IMAGE_COUNT = 12
+    EVAL_IMAGE_COUNT = 4
     EVAL_SEVERITY_STEPS = 3
     
 

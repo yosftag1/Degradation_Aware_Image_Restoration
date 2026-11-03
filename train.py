@@ -213,10 +213,70 @@ def _load_clean_image(image_path, config):
     return image[y:y + size, x:x + size]
 
 
+def _render_single_image_grid(clean_image, deg_rows, severities, title_text):
+    """Build a labeled composite RGB grid for one validation image across all degradations and severities."""
+    h, w = clean_image.shape[:2]
+    num_rows = len(deg_rows)
+    num_sev = len(severities)
+    num_cols = 1 + 2 * num_sev  # Clean + (Degraded, Restored) per severity
+
+    label_w = 180
+    header_h = 64
+    pad = 6
+    group_gap = 10  # Extra spacing before each (Degraded, Restored) severity pair
+
+    # Compute x offsets for each column
+    col_x = []
+    cur_x = label_w + pad
+    for col_idx in range(num_cols):
+        if col_idx > 0 and (col_idx - 1) % 2 == 0:
+            cur_x += group_gap
+        col_x.append(cur_x)
+        cur_x += w + pad
+
+    canvas_w = cur_x + pad
+    canvas_h = header_h + num_rows * (h + pad) + pad
+    canvas = np.full((canvas_h, canvas_w, 3), 24, dtype=np.uint8)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    # Title banner
+    cv2.putText(canvas, title_text, (14, 24), font, 0.62, (255, 220, 120), 2, cv2.LINE_AA)
+
+    # Column headers
+    col_titles = ["Clean (GT)"]
+    for s_idx, sev in enumerate(severities, start=1):
+        col_titles.append(f"S{s_idx} ({sev:.2f}) Degraded")
+        col_titles.append(f"S{s_idx} ({sev:.2f}) Restored")
+
+    for col_idx, c_title in enumerate(col_titles):
+        cx = col_x[col_idx]
+        color = (160, 240, 160) if ("Restored" in c_title or col_idx == 0) else (230, 230, 230)
+        cv2.putText(canvas, c_title, (cx + 6, header_h - 12), font, 0.48, color, 1, cv2.LINE_AA)
+
+    # Populate rows
+    for r_idx, (deg_name, pairs) in enumerate(deg_rows):
+        ry = header_h + r_idx * (h + pad)
+        # Row label on the left
+        pretty_name = deg_name.replace("_", " ").title()
+        cv2.putText(canvas, pretty_name, (12, ry + h // 2 + 5), font, 0.50, (240, 240, 240), 1, cv2.LINE_AA)
+
+        # Column 0: Clean reference
+        canvas[ry:ry + h, col_x[0]:col_x[0] + w] = clean_image
+
+        # Columns 1..2*num_sev: Degraded and Restored pairs
+        for s_idx, (deg_img, rest_img) in enumerate(pairs):
+            c_deg = 1 + 2 * s_idx
+            c_rest = 2 + 2 * s_idx
+            canvas[ry:ry + h, col_x[c_deg]:col_x[c_deg] + w] = deg_img
+            canvas[ry:ry + h, col_x[c_rest]:col_x[c_rest] + w] = rest_img
+
+    return canvas
+
+
 @torch.no_grad()
 def save_validation_samples(model, device, config, val_dataset, eval_indices, epoch):
-    """Save a consistent evaluation set for each degradation and severity."""
-    out_dir = os.path.join(config.OUTPUT_DIR, "val_fixed", f"epoch_{epoch:03d}")
+    """Save all validation degradations, severities, and restorations into one big composite figure per epoch."""
+    out_dir = os.path.join(config.OUTPUT_DIR, "val_fixed")
     os.makedirs(out_dir, exist_ok=True)
 
     raw_model = unwrap_model(model)
@@ -226,16 +286,12 @@ def save_validation_samples(model, device, config, val_dataset, eval_indices, ep
     steps = max(1, int(config.EVAL_SEVERITY_STEPS))
     severities = np.linspace(min_severity, 1.0, steps)
 
+    image_grids = []
+
     for local_idx, img_idx in enumerate(eval_indices):
         image_path = val_dataset.image_paths[img_idx]
         clean_image = _load_clean_image(image_path, config)
-
-        image_tag = f"img_{local_idx:02d}"
-        image_dir = os.path.join(out_dir, image_tag)
-        os.makedirs(image_dir, exist_ok=True)
-
-        clean_path = os.path.join(image_dir, "clean.png")
-        cv2.imwrite(clean_path, cv2.cvtColor(clean_image, cv2.COLOR_RGB2BGR))
+        deg_rows = []
 
         for deg_name in config.DEGRADATION_TYPES:
             degraded_list = []
@@ -254,14 +310,28 @@ def save_validation_samples(model, device, config, val_dataset, eval_indices, ep
                 restored_batch.float().permute(0, 2, 3, 1).clamp(0, 1).cpu().numpy() * 255
             ).astype(np.uint8)
 
-            for step_idx, (degraded, restored_np) in enumerate(
-                zip(degraded_list, restored_batch_np), start=1
-            ):
-                base_name = f"{deg_name}_s{step_idx:02d}"
-                degraded_path = os.path.join(image_dir, f"{base_name}_degraded.png")
-                restored_path = os.path.join(image_dir, f"{base_name}_restored.png")
-                cv2.imwrite(degraded_path, cv2.cvtColor(degraded, cv2.COLOR_RGB2BGR))
-                cv2.imwrite(restored_path, cv2.cvtColor(restored_np, cv2.COLOR_RGB2BGR))
+            pairs = list(zip(degraded_list, restored_batch_np))
+            deg_rows.append((deg_name, pairs))
+
+        title = (
+            f"Epoch {epoch:03d} | Sample {local_idx + 1}/{len(eval_indices)} "
+            f"({os.path.basename(image_path)}) | Bridge: {config.BRIDGE_TYPE} ({config.BRIDGE_STEPS} steps)"
+        )
+        grid = _render_single_image_grid(clean_image, deg_rows, severities, title)
+        image_grids.append(grid)
+
+    if image_grids:
+        # Stack all sample grids vertically into one big figure for the epoch
+        sep_bar = np.full((16, image_grids[0].shape[1], 3), 80, dtype=np.uint8)
+        combined_blocks = []
+        for idx, g in enumerate(image_grids):
+            if idx > 0:
+                combined_blocks.append(sep_bar)
+            combined_blocks.append(g)
+        big_figure = np.concatenate(combined_blocks, axis=0)
+        figure_path = os.path.join(out_dir, f"epoch_{epoch:03d}.png")
+        cv2.imwrite(figure_path, cv2.cvtColor(big_figure, cv2.COLOR_RGB2BGR))
+        print(f"Saved combined validation figure to {figure_path}")
 
 
 def train_epoch(model, train_loader, loss_fn, optimizer, scaler, device, config, epoch):
