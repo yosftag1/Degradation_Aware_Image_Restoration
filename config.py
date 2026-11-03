@@ -35,7 +35,7 @@ class Config:
     # Physics / Stochastic Bridge settings (I2SB, Brownian Bridge, Flow Matching)
     BRIDGE_TYPE = "i2sb"        # Options: "i2sb", "brownian", "flow"
     BRIDGE_STEPS = 4            # Number of reverse bridge steps during inference (t: 1 -> 0)
-    BRIDGE_SIGMA_MAX = 0.25     # Peak noise bubble std (set to 0.0 for deterministic flow)
+    BRIDGE_SIGMA_MAX = 0.05     # Peak noise bubble std (0.05 avoids grainy noise in 4-step pixel walks)
     BRIDGE_OT_ODE = False       # If True, use deterministic OT-ODE sampler at inference
     TIME_EMBEDDING_DIM = 64     # Sinusoidal time embedding dimension for bridge network
     CONCAT_DEGRADED_INPUT = True  # Concatenate [x_t, x_1] as input to backbone

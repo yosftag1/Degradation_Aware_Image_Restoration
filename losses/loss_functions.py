@@ -88,9 +88,9 @@ class FrequencyLoss(nn.Module):
         x_gray = x.float().mean(dim=1, keepdim=True)  # [B, 1, H, W]
         y_gray = y.float().mean(dim=1, keepdim=True)
         
-        # Compute FFT
-        x_fft = torch.fft.rfft2(x_gray.squeeze(1))  # [B, H, W//2+1]
-        y_fft = torch.fft.rfft2(y_gray.squeeze(1))
+        # Compute orthonormal 2D FFT so frequency magnitudes match pixel [0, 1] scale
+        x_fft = torch.fft.rfft2(x_gray.squeeze(1), norm="ortho")  # [B, H, W//2+1]
+        y_fft = torch.fft.rfft2(y_gray.squeeze(1), norm="ortho")
         
         # Magnitude spectrum
         x_mag = torch.abs(x_fft)
@@ -111,7 +111,7 @@ class RestorationLoss(nn.Module):
         self.perceptual_loss = PerceptualLoss(
             layer=config.PERCEPTUAL_LAYERS[0],
             device=device,
-            use_pretrained=False,
+            use_pretrained=True,
         )
         self.frequency_loss = FrequencyLoss()
         

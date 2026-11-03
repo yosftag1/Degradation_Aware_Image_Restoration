@@ -319,8 +319,9 @@ class NAFNetBackbone(nn.Module):
             x = x + skip
             x = decoder(x, cond=cond)
 
-        # Predict clean image hat_x_0 via residual over current bridge state x_t
-        return x_t + self.ending(x)
+        # Predict clean image hat_x_0 via residual over degraded input x_degraded (x_1)
+        # so the backbone never learns a lazy identity shortcut on x_t
+        return x_degraded + self.ending(x)
 
 
 class DegradationEstimator(nn.Module):
@@ -390,20 +391,48 @@ class DegradationAwareRestoration(nn.Module):
         )
 
     def forward_bridge_train(self, degraded, clean, t=None):
-        """Single random-time bridge training step.
+        """Self-conditioned & endpoint-anchored bridge training step.
 
-        1. Samples t ~ Uniform(eps, 1.0)
-        2. Constructs noisy bridge state x_t between clean (x_0) and degraded (x_1)
-        3. Estimates degradation from degraded (x_1)
-        4. Predicts clean image hat_x_0 from (x_t, x_1, t, deg_embedding)
+        Eliminates the train/val bridge shortcut (exposure bias) by:
+        1. Evaluating 50% of samples directly at the starting endpoint t=1.0 (x_t = degraded).
+        2. Evaluating the other 50% at intermediate bridge times t in [0.15, 0.90], where x_t
+           is constructed from the model's own detached t=1.0 prediction (blended with clean)
+           so the network learns to iteratively refine its own predictions without ground-truth leakage.
         """
         b = degraded.shape[0]
-        if t is None:
-            # Sample t in [0.02, 1.0] so the model always sees non-trivial bridge states
-            t = torch.empty(b, device=degraded.device, dtype=degraded.dtype).uniform_(0.02, 1.0)
+        device = degraded.device
+        dtype = degraded.dtype
 
-        x_t = self.bridge.q_sample(x_0=clean, x_1=degraded, t=t)
         deg_type, severity, deg_embedding = self.degradation_estimator(degraded)
+
+        if t is not None:
+            x_t = self.bridge.q_sample(x_0=clean, x_1=degraded, t=t)
+            hat_x_0 = self.backbone(x_t, degradation_embedding=deg_embedding, t=t, x_degraded=degraded)
+            return hat_x_0, deg_type, severity, deg_embedding
+
+        # Split batch: first half at t=1.0 (endpoint), second half at t in [0.15, 0.90] (bridge refinement)
+        mid = b // 2
+        t = torch.ones(b, device=device, dtype=dtype)
+        if mid > 0:
+            t[mid:] = torch.empty(b - mid, device=device, dtype=dtype).uniform_(0.15, 0.90)
+
+            # Self-conditioning: get model's initial prediction at t=1.0 for the refinement half
+            with torch.no_grad():
+                t_init = torch.ones(b - mid, device=device, dtype=dtype)
+                hat_x0_init = self.backbone(
+                    degraded[mid:],
+                    degradation_embedding=deg_embedding[mid:].detach(),
+                    t=t_init,
+                    x_degraded=degraded[mid:],
+                ).clamp(0.0, 1.0)
+                # Blend 70% self-prediction + 30% clean so x_t never leaks raw ground-truth clean
+                x0_anchor = 0.7 * hat_x0_init + 0.3 * clean[mid:]
+
+            x_t_refine = self.bridge.q_sample(x_0=x0_anchor, x_1=degraded[mid:], t=t[mid:])
+            x_t = torch.cat([degraded[:mid], x_t_refine], dim=0)
+        else:
+            x_t = degraded
+
         hat_x_0 = self.backbone(x_t, degradation_embedding=deg_embedding, t=t, x_degraded=degraded)
         return hat_x_0, deg_type, severity, deg_embedding
 
