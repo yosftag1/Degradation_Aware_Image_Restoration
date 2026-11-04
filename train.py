@@ -341,6 +341,15 @@ def save_validation_samples(model, device, config, val_dataset, eval_indices, ep
         cv2.imwrite(figure_path, cv2.cvtColor(big_figure, cv2.COLOR_RGB2BGR))
         print(f"Saved combined validation figure to {figure_path}")
 
+        # Automatically render inline in Kaggle / Jupyter notebook cell output when run via %run
+        try:
+            from IPython import get_ipython
+            if get_ipython() is not None:
+                from IPython.display import display, Image as IPyImage
+                display(IPyImage(filename=figure_path, width=1000))
+        except Exception:
+            pass
+
 
 def train_epoch(model, train_loader, loss_fn, optimizer, scaler, device, config, epoch):
     """Train for one epoch with multi-GPU DataParallel, AMP, and live GPU usage reporting."""
