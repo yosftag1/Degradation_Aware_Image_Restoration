@@ -90,7 +90,7 @@ class Config:
     DEGRADATION_MIN_SEVERITY = {}
     
     # Training
-    LEARNING_RATE = 1e-3
+    LEARNING_RATE = 5e-4
     WEIGHT_DECAY = 1e-4
     EPOCHS = 50
     WARMUP_EPOCHS = 5

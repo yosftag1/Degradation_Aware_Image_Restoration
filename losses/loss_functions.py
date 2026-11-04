@@ -69,10 +69,13 @@ class PerceptualLoss(nn.Module):
         return (x - self.mean) / self.std
     
     def forward(self, x, y):
-        """Compute perceptual loss between x and y."""
-        x_feat = self.features(self.normalize(x))
-        y_feat = self.features(self.normalize(y))
-        return self.loss_fn(x_feat, y_feat)
+        """Compute perceptual loss between x and y in FP32 so un-normalized VGG19 never overflows FP16."""
+        with torch.amp.autocast("cuda", enabled=False):
+            x_f = x.float().clamp(-0.5, 1.5)
+            y_f = y.float().clamp(-0.5, 1.5)
+            x_feat = self.features(self.normalize(x_f))
+            y_feat = self.features(self.normalize(y_f))
+            return self.loss_fn(x_feat, y_feat)
 
 
 class CharbonnierLoss(nn.Module):
@@ -111,18 +114,24 @@ class FrequencyLoss(nn.Module):
         self.loss_fn = nn.L1Loss()
     
     def forward(self, x, y):
-        """Compute RGB 2D FFT magnitude + complex phase loss (cast to float32 for cuFFT stability under AMP)."""
-        x_f = x.float()
-        y_f = y.float()
-        
-        # Orthonormal 2D FFT across all 3 RGB channels [B, 3, H, W//2+1]
-        x_fft = torch.fft.rfft2(x_f, norm="ortho")
-        y_fft = torch.fft.rfft2(y_f, norm="ortho")
-        
-        # Magnitude spectrum L1 + complex (real & imaginary phase-preserving) L1
-        mag_loss = self.loss_fn(torch.abs(x_fft), torch.abs(y_fft))
-        complex_loss = torch.view_as_real(x_fft - y_fft).abs().mean()
-        return 0.5 * mag_loss + 0.5 * complex_loss
+        """Compute RGB 2D FFT magnitude + complex phase loss with epsilon-smoothed sqrt to avoid 0/0 NaN gradients."""
+        with torch.amp.autocast("cuda", enabled=False):
+            x_f = x.float().clamp(-0.5, 1.5)
+            y_f = y.float().clamp(-0.5, 1.5)
+            
+            # Orthonormal 2D FFT across all 3 RGB channels [B, 3, H, W//2+1]
+            x_fft = torch.fft.rfft2(x_f, norm="ortho")
+            y_fft = torch.fft.rfft2(y_f, norm="ortho")
+            
+            # Use sqrt(real^2 + imag^2 + eps) instead of torch.abs(complex) so zero-energy bins (e.g. flat color_banding) never produce 0/0 NaN gradients
+            x_mag = torch.sqrt(x_fft.real.pow(2) + x_fft.imag.pow(2) + 1e-8)
+            y_mag = torch.sqrt(y_fft.real.pow(2) + y_fft.imag.pow(2) + 1e-8)
+            mag_loss = self.loss_fn(x_mag, y_mag)
+
+            diff_real = x_fft.real - y_fft.real
+            diff_imag = x_fft.imag - y_fft.imag
+            complex_loss = torch.mean(torch.sqrt(diff_real.pow(2) + diff_imag.pow(2) + 1e-8))
+            return 0.5 * mag_loss + 0.5 * complex_loss
 
 
 class RestorationLoss(nn.Module):

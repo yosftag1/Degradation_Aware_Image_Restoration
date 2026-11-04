@@ -315,7 +315,7 @@ def save_validation_samples(model, device, config, val_dataset, eval_indices, ep
             with torch.amp.autocast("cuda", enabled=use_amp):
                 restored_batch, _, _, _ = raw_model(degraded_batch)
             restored_batch_np = (
-                restored_batch.float().permute(0, 2, 3, 1).clamp(0, 1).cpu().numpy() * 255
+                restored_batch.float().nan_to_num(0.0).permute(0, 2, 3, 1).clamp(0, 1).cpu().numpy() * 255
             ).astype(np.uint8)
 
             pairs = list(zip(degraded_list, restored_batch_np))
@@ -362,8 +362,17 @@ def train_epoch(model, train_loader, loss_fn, optimizer, scaler, device, config,
     }
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
+    valid_batches = 0
+    warmup_steps = 500
+    base_lr = config.LEARNING_RATE
     
     for batch_idx, batch in enumerate(pbar):
+        # Smooth linear warmup during the first 500 steps of Epoch 1
+        if epoch == 1 and batch_idx < warmup_steps:
+            lr_scale = float(batch_idx + 1) / float(warmup_steps)
+            for pg in optimizer.param_groups:
+                pg["lr"] = base_lr * lr_scale
+
         degraded = batch['degraded'].to(device, non_blocking=True)
         clean = batch['clean'].to(device, non_blocking=True)
         deg_type_target = batch['deg_type'].to(device, non_blocking=True)
@@ -371,40 +380,54 @@ def train_epoch(model, train_loader, loss_fn, optimizer, scaler, device, config,
         
         optimizer.zero_grad(set_to_none=True)
 
-        # Forward pass under AMP (bridge training step: sample random t, construct x_t, predict clean x_0)
+        # Forward pass under AMP; compute loss in FP32 outside autocast for numerical stability
         with torch.amp.autocast("cuda", enabled=use_amp):
             restored, deg_type, severity, deg_embedding = model(degraded, clean)
-            total_batch_loss, loss_dict = loss_fn(
-                restored, clean,
-                deg_type, deg_type_target,
-                severity, severity_target,
-                deg_embedding
-            )
+
+        total_batch_loss, loss_dict = loss_fn(
+            restored.float(), clean.float(),
+            deg_type.float(), deg_type_target,
+            severity.float(), severity_target,
+            deg_embedding
+        )
+
+        # Guard against non-finite forward loss so a bad batch can never corrupt model weights
+        if not torch.isfinite(total_batch_loss):
+            print(f"\n[Warning] Skipping non-finite batch loss at Epoch {epoch}, Batch {batch_idx + 1}")
+            optimizer.zero_grad(set_to_none=True)
+            continue
         
-        # Backward pass with GradScaler
+        # Backward pass with GradScaler and finite-gradient verification
         if scaler is not None and use_amp:
             scaler.scale(total_batch_loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if torch.isfinite(grad_norm):
+                scaler.step(optimizer)
+            else:
+                optimizer.zero_grad(set_to_none=True)
             scaler.update()
         else:
             total_batch_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if torch.isfinite(grad_norm):
+                optimizer.step()
+            else:
+                optimizer.zero_grad(set_to_none=True)
         
         # Print immediate GPU usage snapshot on the very first batch of Epoch 1
         if epoch == 1 and batch_idx == 0:
             print_gpu_usage("Live GPU Usage (Epoch 1, Batch 1 Active)")
 
         # Update metrics
+        valid_batches += 1
         total_loss += total_batch_loss.item()
         for key in loss_components:
             loss_components[key] += loss_dict[key]
         
         # Log every LOG_INTERVAL batches (or on batch 1) with live GPU utilization
         if batch_idx == 0 or (batch_idx + 1) % config.LOG_INTERVAL == 0:
-            avg_loss = total_loss / (batch_idx + 1)
+            avg_loss = total_loss / max(1, valid_batches)
             pbar.set_postfix({
                 'loss': f'{avg_loss:.4f}',
                 'gpu': format_gpu_postfix(),
@@ -413,7 +436,7 @@ def train_epoch(model, train_loader, loss_fn, optimizer, scaler, device, config,
     print_gpu_usage(f"End of Epoch {epoch} GPU Usage Summary")
 
     # Average metrics
-    num_batches = len(train_loader)
+    num_batches = max(1, valid_batches)
     avg_loss = total_loss / num_batches
     for key in loss_components:
         loss_components[key] /= num_batches
@@ -445,15 +468,16 @@ def validate(model, val_loader, loss_fn, device, config, val_dataset, eval_indic
         deg_type_target = batch['deg_type'].to(device, non_blocking=True)
         severity_target = batch['severity'].to(device, non_blocking=True)
         
-        # Forward pass (multi-step reverse bridge sampling from t=1 -> t=0)
+        # Forward pass (multi-step reverse bridge sampling from t=1 -> t=0); compute loss in FP32
         with torch.amp.autocast("cuda", enabled=use_amp):
             restored, deg_type, severity, deg_embedding = model(degraded)
-            total_batch_loss, loss_dict = loss_fn(
-                restored, clean,
-                deg_type, deg_type_target,
-                severity, severity_target,
-                deg_embedding
-            )
+
+        total_batch_loss, loss_dict = loss_fn(
+            restored.float(), clean.float(),
+            deg_type.float(), deg_type_target,
+            severity.float(), severity_target,
+            deg_embedding
+        )
 
         if save_samples and not samples_saved:
             save_validation_samples(model, device, config, val_dataset, eval_indices, epoch)

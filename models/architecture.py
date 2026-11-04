@@ -128,15 +128,15 @@ class LayerNorm2d(nn.Module):
 
 
 class SimpleGate(nn.Module):
-    """Simple gating used in NAFNet blocks."""
+    """Simple gating used in NAFNet blocks (clamped to prevent FP16 x1*x2 overflow)."""
 
     def forward(self, x):
         x1, x2 = x.chunk(2, dim=1)
-        return x1 * x2
+        return x1.clamp(-64.0, 64.0) * x2.clamp(-64.0, 64.0)
 
 
 class NAFBlock(nn.Module):
-    """NAFNet block with depthwise conv, simple gate, and optional time+degradation conditioning."""
+    """NAFNet block with depthwise conv, simple gate, and bounded time+degradation FiLM conditioning."""
 
     def __init__(self, channels, dw_size=3, ffn_expand=2, cond_dim=0):
         super().__init__()
@@ -165,11 +165,13 @@ class NAFBlock(nn.Module):
         self.beta = nn.Parameter(torch.zeros(1, channels, 1, 1))
         self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
 
-        self.cond_proj = (
-            nn.Sequential(nn.SiLU(), nn.Linear(cond_dim, channels * 4))
-            if cond_dim > 0
-            else None
-        )
+        if cond_dim > 0:
+            proj_linear = nn.Linear(cond_dim, channels * 4)
+            nn.init.zeros_(proj_linear.weight)
+            nn.init.zeros_(proj_linear.bias)
+            self.cond_proj = nn.Sequential(nn.SiLU(), proj_linear)
+        else:
+            self.cond_proj = None
 
     def forward(self, x, cond=None):
         residual = x
@@ -179,20 +181,21 @@ class NAFBlock(nn.Module):
             scale1, shift1, scale2, shift2 = (
                 self.cond_proj(cond).unsqueeze(-1).unsqueeze(-1).chunk(4, dim=1)
             )
-            x = x * (1.0 + scale1) + shift1
+            # Bound FiLM scale and shift with tanh so 36 stacked blocks cannot overflow FP16
+            x = x * (1.0 + 0.25 * torch.tanh(scale1)) + 2.0 * torch.tanh(shift1)
         else:
             scale2, shift2 = None, None
 
         x = self.pw1(x)
         x = self.dwconv(x)
         x = self.sg(x)
-        x = x * self.sca(x)
+        x = x * self.sca(x).clamp(-16.0, 16.0)
         x = self.pw2(x)
         x = residual + x * self.beta
 
         y = self.norm2(x)
         if scale2 is not None:
-            y = y * (1.0 + scale2) + shift2
+            y = y * (1.0 + 0.25 * torch.tanh(scale2)) + 2.0 * torch.tanh(shift2)
         y = self.pw3(y)
         y = self.sg2(y)
         y = self.pw4(y)
@@ -342,7 +345,8 @@ class DegradationEstimator(nn.Module):
         self.conv2 = nn.Conv2d(32, 64, 3, stride=2, padding=1)
         self.conv3 = nn.Conv2d(64, 128, 3, stride=2, padding=1)
 
-        # Mean (128) + Std (128) = 256 diagnostic features
+        # Mean (128) + Std (128) = 256 diagnostic features (normalized for AMP stability)
+        self.stats_norm = nn.LayerNorm(256)
         self.head_mlp = nn.Sequential(
             nn.Linear(256, 128),
             nn.SiLU(),
@@ -354,29 +358,32 @@ class DegradationEstimator(nn.Module):
         self.fc_severity = nn.Linear(128, num_degradations)
         # Conditioning embedding combines hidden features + predicted presence + severity vector
         self.fc_embedding = nn.Linear(128 + 2 * num_degradations, embedding_dim)
+        self.emb_norm = nn.LayerNorm(embedding_dim)
 
     def forward(self, x):
+        orig_dtype = x.dtype
         x = F.silu(self.conv1(x))
         x = F.silu(self.conv2(x))
         x = F.silu(self.conv3(x))
 
-        # Compute spatial mean and standard deviation in float32 for numerical stability
-        x_f = x.float()
-        feat_mean = x_f.mean(dim=[2, 3])
-        feat_std = torch.sqrt(x_f.var(dim=[2, 3], unbiased=False) + 1e-6)
-        stats = torch.cat([feat_mean, feat_std], dim=1).to(x.dtype)
+        # Compute spatial mean, std, and MLP heads in float32 so stats never overflow FP16
+        with torch.amp.autocast("cuda", enabled=False):
+            x_f = x.float()
+            feat_mean = x_f.mean(dim=[2, 3])
+            feat_std = torch.sqrt(x_f.var(dim=[2, 3], unbiased=False) + 1e-5)
+            stats = self.stats_norm(torch.cat([feat_mean, feat_std], dim=1))
 
-        hidden = self.head_mlp(stats)
-        deg_type = self.fc_type(hidden)
-        deg_probs = torch.sigmoid(deg_type)
-        raw_severity = torch.sigmoid(self.fc_severity(hidden))
-        # Couple predicted 8D severity vector with presence probability so inactive slots naturally vanish
-        severity = deg_probs * raw_severity
+            hidden = self.head_mlp(stats)
+            deg_type = self.fc_type(hidden).clamp(-20.0, 20.0)
+            deg_probs = torch.sigmoid(deg_type)
+            raw_severity = torch.sigmoid(self.fc_severity(hidden).clamp(-20.0, 20.0))
+            # Couple predicted 8D severity vector with presence probability so inactive slots naturally vanish
+            severity = deg_probs * raw_severity
 
-        emb_in = torch.cat([hidden, deg_probs, severity], dim=1)
-        embedding = self.fc_embedding(emb_in)
+            emb_in = torch.cat([hidden, deg_probs, severity], dim=1)
+            embedding = self.emb_norm(self.fc_embedding(emb_in))
 
-        return deg_type, severity, embedding
+        return deg_type, severity, embedding.to(orig_dtype)
 
 
 class DegradationAwareRestoration(nn.Module):
