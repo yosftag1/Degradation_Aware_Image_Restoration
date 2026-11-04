@@ -500,12 +500,14 @@ def validate(model, val_loader, loss_fn, device, config, val_dataset, eval_indic
     return avg_loss, loss_components
 
 
-def save_checkpoint(model, optimizer, scheduler, epoch, loss, config, is_best=False):
+def save_checkpoint(model, optimizer, scheduler, epoch, loss, config, is_best=False, is_latest=False):
     """Save model checkpoint (always unwrapped so single-GPU inference works seamlessly)."""
     os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
     
     if is_best:
         ckpt_path = os.path.join(config.CHECKPOINT_DIR, "model_best.pt")
+    elif is_latest:
+        ckpt_path = os.path.join(config.CHECKPOINT_DIR, "model_latest.pt")
     else:
         ckpt_path = os.path.join(config.CHECKPOINT_DIR, f"model_epoch_{epoch:03d}.pt")
     
@@ -594,6 +596,9 @@ def train(config, debug=False, resume_from=None):
             model, train_loader, loss_fn, optimizer, scaler, device, config, epoch
         )
         
+        # Step learning rate scheduler before saving checkpoints so resumed runs have the exact next-epoch LR
+        scheduler.step()
+
         # Validate every N epochs (configurable) or at epoch end
         if epoch % max(1, config.VAL_EPOCH_INTERVAL) == 0 or epoch == config.EPOCHS:
             val_loss, val_losses = validate(
@@ -626,12 +631,12 @@ def train(config, debug=False, resume_from=None):
             'components': train_losses
         })
         
-        # Save checkpoint
+        # Always update model_latest.pt after every epoch for easy resuming
+        save_checkpoint(model, optimizer, scheduler, epoch, best_loss, config, is_latest=True)
+
+        # Save periodic milestone checkpoint
         if epoch % config.CHECKPOINT_EVERY_N_EPOCHS == 0:
             save_checkpoint(model, optimizer, scheduler, epoch, train_loss, config, is_best=False)
-        
-        # Step scheduler
-        scheduler.step()
     
     # Save training history
     os.makedirs(config.LOG_DIR, exist_ok=True)
