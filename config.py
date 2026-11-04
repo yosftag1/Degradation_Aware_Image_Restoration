@@ -24,21 +24,21 @@ class Config:
         "jpeg_compression",
         "color_degradation",
         "exposure_issue",
-        "lens_distortion",
+        "atmospheric_haze",
         "downsample_upsample",
         "defocus_blur",
     ]
-    DEGRADATION_EMBEDDING_DIM = 16
+    DEGRADATION_EMBEDDING_DIM = 32
     SEVERITY_LEVELS = 5
-    MIN_SEVERITY = 0.4
+    MIN_SEVERITY = 0.2
 
     # Physics / Stochastic Bridge settings (I2SB, Brownian Bridge, Flow Matching)
-    BRIDGE_TYPE = "i2sb"        # Options: "i2sb", "brownian", "flow"
-    BRIDGE_STEPS = 4            # Number of reverse bridge steps during inference (t: 1 -> 0)
-    BRIDGE_SIGMA_MAX = 0.05     # Peak noise bubble std (0.05 avoids grainy noise in 4-step pixel walks)
-    BRIDGE_OT_ODE = False       # If True, use deterministic OT-ODE sampler at inference
-    TIME_EMBEDDING_DIM = 64     # Sinusoidal time embedding dimension for bridge network
-    CONCAT_DEGRADED_INPUT = True  # Concatenate [x_t, x_1] as input to backbone
+    BRIDGE_TYPE = "i2sb"          # Options: "i2sb", "brownian", "flow"
+    BRIDGE_STEPS = 4              # Number of reverse bridge steps during inference (t: 1 -> 0)
+    BRIDGE_SIGMA_MAX = 0.05       # Peak noise bubble std (0.05 avoids grainy noise in 4-step pixel walks)
+    BRIDGE_OT_ODE = False         # If True, use deterministic OT-ODE sampler at inference
+    TIME_EMBEDDING_DIM = 64       # Sinusoidal time embedding dimension for bridge network
+    CONCAT_DEGRADED_INPUT = False # Pure x_t input to bridge backbone (prevents linear (x_t, x_1) shortcut)
     
     # Data
     DATASET_NAME = "DIV2K"
@@ -58,41 +58,35 @@ class Config:
     USE_AMP = True              # Mixed precision (FP16) for T4 Tensor Cores
     MULTI_GPU = True            # Use all available GPUs via DataParallel (e.g. Kaggle T4 x2)
     
-    # Degradation pipeline
-    GAUSSIAN_NOISE_STD_RANGE = (10.0, 70.0)
-    MOTION_BLUR_KERNEL_RANGE = (7, 35)
+    # Degradation pipeline (physically recoverable ranges across severity in [0.2, 1.0])
+    GAUSSIAN_NOISE_STD_RANGE = (8.0, 50.0)
+    MOTION_BLUR_KERNEL_RANGE = (5, 27)
     MOTION_BLUR_ANGLE_RANGE = (0, 180)
-    JPEG_QUALITY_RANGE = (3, 45)
-    JPEG_MAX_SEVERITY_STEP = 3
-    COLOR_SHIFT_MAX = 0.8
-    SATURATION_LOSS_MAX = 0.9
-    HUE_SHIFT_MAX = 45
-    BRIGHTNESS_MAX = 0.7
-    CONTRAST_MAX = 0.9
-    GAMMA_RANGE = (0.4, 2.4)
-    DOWNSAMPLE_SCALE_RANGE = (0.2, 0.95)
-    DEFOCUS_KERNEL_RANGE = (3, 21)
-    LENS_DISTORTION_K1_MAX = 0.7
-    LENS_DISTORTION_K2_MAX = 0.3
+    JPEG_QUALITY_RANGE = (10, 50)
+    JPEG_MAX_SEVERITY_STEP = 5
+    COLOR_SHIFT_MAX = 0.35      # Physical white-balance / illuminant channel cast
+    SATURATION_LOSS_MAX = 0.55  # Dye fading without destroying chroma identity
+    HUE_SHIFT_MAX = 10          # Subtle tint drift (avoids unidentifiable hue roulette)
+    BRIGHTNESS_MAX = 0.25       # Avoids hard-clipping entire regions to 0 or 255
+    CONTRAST_MAX = 0.35
+    GAMMA_RANGE = (0.55, 1.85)  # Scaled by severity in dataset.py
+    DOWNSAMPLE_SCALE_RANGE = (0.25, 0.75)
+    DEFOCUS_KERNEL_RANGE = (3, 17)
+    HAZE_BETA_RANGE = (0.6, 2.2)        # Atmospheric scattering coefficient beta
+    HAZE_AIRLIGHT_RANGE = (0.75, 0.98)  # Atmospheric airlight intensity A
 
+    # Keep boosts at 1.0 so all 5 severity levels [0.2, 0.4, 0.6, 0.8, 1.0] stay distinct and learnable
     DEGRADATION_SEVERITY_BOOSTS = {
-        "gaussian_noise": 1.8,
-        "motion_blur": 1.4,
+        "gaussian_noise": 1.0,
+        "motion_blur": 1.0,
         "jpeg_compression": 1.0,
-        "color_degradation": 1.5,
+        "color_degradation": 1.0,
         "exposure_issue": 1.0,
-        "lens_distortion": 1.6,
-        "downsample_upsample": 1.5,
-        "defocus_blur": 1.4,
+        "atmospheric_haze": 1.0,
+        "downsample_upsample": 1.0,
+        "defocus_blur": 1.0,
     }
-    DEGRADATION_MIN_SEVERITY = {
-        "gaussian_noise": 0.7,
-        "motion_blur": 0.6,
-        "color_degradation": 0.65,
-        "lens_distortion": 0.6,
-        "downsample_upsample": 0.3,
-        "defocus_blur": 0.3,
-    }
+    DEGRADATION_MIN_SEVERITY = {}
     
     # Training
     LEARNING_RATE = 1e-3

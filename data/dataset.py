@@ -63,22 +63,23 @@ class DegradationPipeline:
         return degraded, "jpeg_compression"
 
     def apply_color_degradation(self, image, severity):
-        """Apply color-related degradations such as white balance, saturation, and hue shifts."""
+        """Apply physical white-balance illuminant cast and dye saturation fading."""
         image_float = image.astype(np.float32) / 255.0
 
-        # White balance style channel shifts in RGB space.
+        # Physical illuminant color cast (Von Kries channel scaling, normalized to preserve mean luminance)
         max_shift = self.config.COLOR_SHIFT_MAX * severity
         channel_gains = np.array([
             1.0 + random.uniform(-max_shift, max_shift),
-            1.0 + random.uniform(-max_shift, max_shift),
+            1.0 + random.uniform(-max_shift * 0.6, max_shift * 0.6),
             1.0 + random.uniform(-max_shift, max_shift),
         ], dtype=np.float32)
+        channel_gains /= np.mean(channel_gains)
         image_float = np.clip(image_float * channel_gains.reshape(1, 1, 3), 0.0, 1.0)
 
-        # Convert to HSV for saturation and hue changes.
+        # Dye fading (controlled saturation reduction + subtle tint drift)
         hsv = cv2.cvtColor((image_float * 255).astype(np.uint8), cv2.COLOR_RGB2HSV).astype(np.float32)
         hue_shift = int(random.uniform(-self.config.HUE_SHIFT_MAX, self.config.HUE_SHIFT_MAX) * severity)
-        saturation_scale = 1.0 - random.uniform(0.3, self.config.SATURATION_LOSS_MAX) * severity
+        saturation_scale = 1.0 - random.uniform(0.15, self.config.SATURATION_LOSS_MAX) * severity
         hsv[:, :, 0] = (hsv[:, :, 0] + hue_shift) % 180
         hsv[:, :, 1] = np.clip(hsv[:, :, 1] * saturation_scale, 0, 255)
 
@@ -86,42 +87,56 @@ class DegradationPipeline:
         return degraded, "color_degradation"
 
     def apply_exposure_issue(self, image, severity):
-        """Apply exposure and contrast issues."""
+        """Apply physical exposure and gamma curve shifts scaled by severity without hard clipping."""
         image_float = image.astype(np.float32) / 255.0
 
-        brightness_delta = random.uniform(-self.config.BRIGHTNESS_MAX, self.config.BRIGHTNESS_MAX) * severity
-        contrast_scale = 1.0 + random.uniform(-self.config.CONTRAST_MAX, self.config.CONTRAST_MAX) * severity
-        gamma = random.uniform(*self.config.GAMMA_RANGE)
+        # Scale gamma deviation from 1.0 proportionally to severity (overexposure < 1, underexposure > 1)
+        min_g, max_g = self.config.GAMMA_RANGE
+        if random.random() < 0.5:
+            gamma = 1.0 + severity * (max_g - 1.0)
+            brightness_delta = -random.uniform(0.02, self.config.BRIGHTNESS_MAX) * severity
+        else:
+            gamma = 1.0 - severity * (1.0 - min_g)
+            brightness_delta = random.uniform(0.02, self.config.BRIGHTNESS_MAX) * severity
 
-        degraded = image_float * contrast_scale + brightness_delta
-        degraded = np.clip(degraded, 0.0, 1.0)
-
-        degraded = np.power(np.clip(degraded, 0.0, 1.0), gamma)
+        contrast_scale = 1.0 - random.uniform(0.05, self.config.CONTRAST_MAX) * severity
+        # Compress contrast around mid-gray (0.5) so highlights/shadows aren't hard-clipped
+        degraded = (image_float - 0.5) * contrast_scale + 0.5 + brightness_delta
+        degraded = np.clip(degraded, 1e-4, 1.0)
+        degraded = np.power(degraded, gamma)
         degraded = np.clip(degraded * 255.0, 0, 255).astype(np.uint8)
         return degraded, "exposure_issue"
 
-    def apply_lens_distortion(self, image, severity):
-        """Apply stronger radial lens distortion."""
+    def apply_atmospheric_haze(self, image, severity):
+        """Apply physical Koschmieder atmospheric scattering haze: I(x) = J(x)*t(x) + A*(1 - t(x))."""
         h, w = image.shape[:2]
-        fx = 0.9 * w
-        fy = 0.9 * h
-        cx = w / 2.0
-        cy = h / 2.0
+        image_float = image.astype(np.float32) / 255.0
 
-        k1 = self.config.LENS_DISTORTION_K1_MAX * severity
-        k2 = self.config.LENS_DISTORTION_K2_MAX * severity
+        min_beta, max_beta = getattr(self.config, "HAZE_BETA_RANGE", (0.6, 2.2))
+        min_A, max_A = getattr(self.config, "HAZE_AIRLIGHT_RANGE", (0.75, 0.98))
+        beta = min_beta + severity * (max_beta - min_beta)
 
-        xs = (np.arange(w, dtype=np.float32) - cx) / fx
-        ys = (np.arange(h, dtype=np.float32) - cy) / fy
-        grid_x, grid_y = np.meshgrid(xs, ys)
-        r2 = grid_x * grid_x + grid_y * grid_y
-        radial = 1.0 + k1 * r2 + k2 * r2 * r2
+        # Construct smooth spatial depth map d(x) in [0.25, 1.0]
+        y_grad = np.linspace(0.95, 0.30, h, dtype=np.float32)[:, None]
+        x_freq = random.uniform(1.0, 2.5)
+        x_phase = random.uniform(0.0, 2.0 * np.pi)
+        x_wave = 0.12 * np.sin(np.linspace(0.0, x_freq * np.pi, w, dtype=np.float32) + x_phase)[None, :]
+        depth = np.clip(y_grad + x_wave, 0.2, 1.0)[:, :, None]
 
-        map_x = ((grid_x * radial) * fx + cx).astype(np.float32)
-        map_y = ((grid_y * radial) * fy + cy).astype(np.float32)
+        # Transmission map t(x) = exp(-beta * d(x))
+        transmission = np.exp(-beta * depth)
 
-        warped = cv2.remap(image, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-        return warped, "lens_distortion"
+        # Slightly warm or cool atmospheric airlight vector A
+        base_A = random.uniform(min_A, max_A)
+        airlight = np.array([
+            np.clip(base_A + random.uniform(-0.04, 0.04), 0.7, 1.0),
+            np.clip(base_A + random.uniform(-0.03, 0.03), 0.7, 1.0),
+            np.clip(base_A + random.uniform(-0.04, 0.05), 0.7, 1.0),
+        ], dtype=np.float32).reshape(1, 1, 3)
+
+        hazy = image_float * transmission + airlight * (1.0 - transmission)
+        degraded = np.clip(hazy * 255.0, 0, 255).astype(np.uint8)
+        return degraded, "atmospheric_haze"
 
     def apply_downsample_upsample(self, image, severity):
         """Downsample then upsample to simulate resolution loss."""
@@ -168,8 +183,8 @@ class DegradationPipeline:
             degraded, _ = self.apply_color_degradation(image, severity)
         elif deg_type_name == "exposure_issue":
             degraded, _ = self.apply_exposure_issue(image, severity)
-        elif deg_type_name == "lens_distortion":
-            degraded, _ = self.apply_lens_distortion(image, severity)
+        elif deg_type_name == "atmospheric_haze":
+            degraded, _ = self.apply_atmospheric_haze(image, severity)
         elif deg_type_name == "downsample_upsample":
             degraded, _ = self.apply_downsample_upsample(image, severity)
         elif deg_type_name == "defocus_blur":
@@ -193,8 +208,8 @@ class DegradationPipeline:
             degraded, _ = self.apply_color_degradation(image, severity)
         elif deg_type_name == "exposure_issue":
             degraded, _ = self.apply_exposure_issue(image, severity)
-        elif deg_type_name == "lens_distortion":
-            degraded, _ = self.apply_lens_distortion(image, severity)
+        elif deg_type_name == "atmospheric_haze":
+            degraded, _ = self.apply_atmospheric_haze(image, severity)
         elif deg_type_name == "downsample_upsample":
             degraded, _ = self.apply_downsample_upsample(image, severity)
         elif deg_type_name == "defocus_blur":

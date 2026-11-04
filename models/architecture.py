@@ -166,7 +166,7 @@ class NAFBlock(nn.Module):
         self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
 
         self.cond_proj = (
-            nn.Sequential(nn.SiLU(), nn.Linear(cond_dim, channels * 2))
+            nn.Sequential(nn.SiLU(), nn.Linear(cond_dim, channels * 4))
             if cond_dim > 0
             else None
         )
@@ -176,10 +176,12 @@ class NAFBlock(nn.Module):
 
         x = self.norm1(x)
         if self.cond_proj is not None and cond is not None:
-            shift1, shift2 = self.cond_proj(cond).unsqueeze(-1).unsqueeze(-1).chunk(2, dim=1)
-            x = x + shift1
+            scale1, shift1, scale2, shift2 = (
+                self.cond_proj(cond).unsqueeze(-1).unsqueeze(-1).chunk(4, dim=1)
+            )
+            x = x * (1.0 + scale1) + shift1
         else:
-            shift2 = None
+            scale2, shift2 = None, None
 
         x = self.pw1(x)
         x = self.dwconv(x)
@@ -189,8 +191,8 @@ class NAFBlock(nn.Module):
         x = residual + x * self.beta
 
         y = self.norm2(x)
-        if shift2 is not None:
-            y = y + shift2
+        if scale2 is not None:
+            y = y * (1.0 + scale2) + shift2
         y = self.pw3(y)
         y = self.sg2(y)
         y = self.pw4(y)
@@ -319,39 +321,52 @@ class NAFNetBackbone(nn.Module):
             x = x + skip
             x = decoder(x, cond=cond)
 
-        # Predict clean image hat_x_0 via residual over degraded input x_degraded (x_1)
-        # so the backbone never learns a lazy identity shortcut on x_t
-        return x_degraded + self.ending(x)
+        # Predict clean image hat_x_0 via residual over current bridge state x_t
+        return x_t + self.ending(x)
 
 
 class DegradationEstimator(nn.Module):
-    """Predicts degradation type and severity from degraded input image x_1."""
+    """Predicts degradation type, severity, and conditioning embedding from degraded input x_1.
 
-    def __init__(self, num_degradations=3, severity_levels=5, embedding_dim=16):
+    Uses both Global Mean and Global Standard Deviation pooling so the estimator can
+    directly measure high-frequency noise variance, blur smoothness, and color/exposure statistics.
+    """
+
+    def __init__(self, num_degradations=3, severity_levels=5, embedding_dim=32):
         super().__init__()
         self.num_degradations = num_degradations
         self.severity_levels = severity_levels
         self.embedding_dim = embedding_dim
 
-        self.conv1 = nn.Conv2d(3, 16, 3, stride=2, padding=1)
-        self.conv2 = nn.Conv2d(16, 32, 3, stride=2, padding=1)
-        self.conv3 = nn.Conv2d(32, 64, 3, stride=2, padding=1)
+        self.conv1 = nn.Conv2d(3, 32, 3, stride=2, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, 3, stride=2, padding=1)
+        self.conv3 = nn.Conv2d(64, 128, 3, stride=2, padding=1)
 
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        # Mean (128) + Std (128) = 256 diagnostic features
+        self.head_mlp = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.SiLU(),
+        )
 
-        self.fc_type = nn.Linear(64, num_degradations)
-        self.fc_severity = nn.Linear(64, severity_levels)
-        self.fc_embedding = nn.Linear(64, embedding_dim)
+        self.fc_type = nn.Linear(128, num_degradations)
+        self.fc_severity = nn.Linear(128, severity_levels)
+        self.fc_embedding = nn.Linear(128, embedding_dim)
 
     def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = self.global_pool(x).view(x.shape[0], -1)
+        x = F.silu(self.conv1(x))
+        x = F.silu(self.conv2(x))
+        x = F.silu(self.conv3(x))
 
-        deg_type = self.fc_type(x)
-        severity = self.fc_severity(x)
-        embedding = self.fc_embedding(x)
+        # Compute spatial mean and standard deviation in float32 for numerical stability
+        x_f = x.float()
+        feat_mean = x_f.mean(dim=[2, 3])
+        feat_std = torch.sqrt(x_f.var(dim=[2, 3], unbiased=False) + 1e-6)
+        stats = torch.cat([feat_mean, feat_std], dim=1).to(x.dtype)
+
+        hidden = self.head_mlp(stats)
+        deg_type = self.fc_type(hidden)
+        severity = self.fc_severity(hidden)
+        embedding = self.fc_embedding(hidden)
 
         return deg_type, severity, embedding
 
@@ -391,48 +406,24 @@ class DegradationAwareRestoration(nn.Module):
         )
 
     def forward_bridge_train(self, degraded, clean, t=None):
-        """Self-conditioned & endpoint-anchored bridge training step.
+        """Single-pass endpoint-anchored I2SB bridge training step.
 
-        Eliminates the train/val bridge shortcut (exposure bias) by:
-        1. Evaluating 50% of samples directly at the starting endpoint t=1.0 (x_t = degraded).
-        2. Evaluating the other 50% at intermediate bridge times t in [0.15, 0.90], where x_t
-           is constructed from the model's own detached t=1.0 prediction (blended with clean)
-           so the network learns to iteratively refine its own predictions without ground-truth leakage.
+        Because the backbone receives ONLY x_t (and NOT x_1 alongside x_t), it cannot
+        algebraically cancel out x_1. Sampling t=1.0 on 50% of the batch and t in [0.15, 0.95]
+        on the other 50% ensures strong restoration at t=1.0 and smooth refinement across the bridge.
         """
         b = degraded.shape[0]
         device = degraded.device
         dtype = degraded.dtype
 
+        if t is None:
+            mid = b // 2
+            t = torch.ones(b, device=device, dtype=dtype)
+            if mid > 0:
+                t[mid:] = torch.empty(b - mid, device=device, dtype=dtype).uniform_(0.15, 0.95)
+
+        x_t = self.bridge.q_sample(x_0=clean, x_1=degraded, t=t)
         deg_type, severity, deg_embedding = self.degradation_estimator(degraded)
-
-        if t is not None:
-            x_t = self.bridge.q_sample(x_0=clean, x_1=degraded, t=t)
-            hat_x_0 = self.backbone(x_t, degradation_embedding=deg_embedding, t=t, x_degraded=degraded)
-            return hat_x_0, deg_type, severity, deg_embedding
-
-        # Split batch: first half at t=1.0 (endpoint), second half at t in [0.15, 0.90] (bridge refinement)
-        mid = b // 2
-        t = torch.ones(b, device=device, dtype=dtype)
-        if mid > 0:
-            t[mid:] = torch.empty(b - mid, device=device, dtype=dtype).uniform_(0.15, 0.90)
-
-            # Self-conditioning: get model's initial prediction at t=1.0 for the refinement half
-            with torch.no_grad():
-                t_init = torch.ones(b - mid, device=device, dtype=dtype)
-                hat_x0_init = self.backbone(
-                    degraded[mid:],
-                    degradation_embedding=deg_embedding[mid:].detach(),
-                    t=t_init,
-                    x_degraded=degraded[mid:],
-                ).clamp(0.0, 1.0)
-                # Blend 70% self-prediction + 30% clean so x_t never leaks raw ground-truth clean
-                x0_anchor = 0.7 * hat_x0_init + 0.3 * clean[mid:]
-
-            x_t_refine = self.bridge.q_sample(x_0=x0_anchor, x_1=degraded[mid:], t=t[mid:])
-            x_t = torch.cat([degraded[:mid], x_t_refine], dim=0)
-        else:
-            x_t = degraded
-
         hat_x_0 = self.backbone(x_t, degradation_embedding=deg_embedding, t=t, x_degraded=degraded)
         return hat_x_0, deg_type, severity, deg_embedding
 
