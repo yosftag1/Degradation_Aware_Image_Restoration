@@ -69,13 +69,12 @@ class PerceptualLoss(nn.Module):
         return (x - self.mean) / self.std
     
     def forward(self, x, y):
-        """Compute perceptual loss between x and y in FP32 so un-normalized VGG19 never overflows FP16."""
-        with torch.amp.autocast("cuda", enabled=False):
-            x_f = x.float().clamp(-0.5, 1.5)
-            y_f = y.float().clamp(-0.5, 1.5)
-            x_feat = self.features(self.normalize(x_f))
-            y_feat = self.features(self.normalize(y_f))
-            return self.loss_fn(x_feat, y_feat)
+        """Compute perceptual loss with clamped inputs (runs in FP16 under autocast to save ~400MB VRAM)."""
+        x_clamped = x.clamp(-0.2, 1.2)
+        with torch.no_grad():
+            y_feat = self.features(self.normalize(y.clamp(0.0, 1.0))).detach()
+        x_feat = self.features(self.normalize(x_clamped))
+        return self.loss_fn(x_feat.float(), y_feat.float())
 
 
 class CharbonnierLoss(nn.Module):

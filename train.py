@@ -2,8 +2,10 @@
 
 import os
 import sys
-# Kaggle notebook path fix
+import gc
+# Kaggle notebook path fix & CUDA memory fragmentation prevention
 sys.path.insert(0, '/kaggle/working/Degradation_Aware_Image_Restoration')
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import random
 import subprocess
@@ -137,6 +139,10 @@ def format_gpu_postfix():
 
 def setup_training(config, debug=False):
     """Setup training environment with multi-GPU DataParallel and AMP support."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     device = torch.device(config.DEVICE if torch.cuda.is_available() else "cpu")
     num_gpus = torch.cuda.device_count() if device.type == "cuda" else 0
     use_multi_gpu = getattr(config, "MULTI_GPU", True) and num_gpus > 1
@@ -380,16 +386,15 @@ def train_epoch(model, train_loader, loss_fn, optimizer, scaler, device, config,
         
         optimizer.zero_grad(set_to_none=True)
 
-        # Forward pass under AMP; compute loss in FP32 outside autocast for numerical stability
+        # Forward pass + Perceptual VGG under AMP to keep GPU 0 VRAM ~12.4 GB
         with torch.amp.autocast("cuda", enabled=use_amp):
             restored, deg_type, severity, deg_embedding = model(degraded, clean)
-
-        total_batch_loss, loss_dict = loss_fn(
-            restored.float(), clean.float(),
-            deg_type.float(), deg_type_target,
-            severity.float(), severity_target,
-            deg_embedding
-        )
+            total_batch_loss, loss_dict = loss_fn(
+                restored, clean,
+                deg_type, deg_type_target,
+                severity, severity_target,
+                deg_embedding
+            )
 
         # Guard against non-finite forward loss so a bad batch can never corrupt model weights
         if not torch.isfinite(total_batch_loss):

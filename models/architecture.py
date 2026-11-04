@@ -166,7 +166,7 @@ class NAFBlock(nn.Module):
         self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
 
         if cond_dim > 0:
-            proj_linear = nn.Linear(cond_dim, channels * 4)
+            proj_linear = nn.Linear(cond_dim, channels * 2)
             nn.init.zeros_(proj_linear.weight)
             nn.init.zeros_(proj_linear.bias)
             self.cond_proj = nn.Sequential(nn.SiLU(), proj_linear)
@@ -178,13 +178,11 @@ class NAFBlock(nn.Module):
 
         x = self.norm1(x)
         if self.cond_proj is not None and cond is not None:
-            scale1, shift1, scale2, shift2 = (
-                self.cond_proj(cond).unsqueeze(-1).unsqueeze(-1).chunk(4, dim=1)
+            scale, shift = (
+                self.cond_proj(cond).unsqueeze(-1).unsqueeze(-1).chunk(2, dim=1)
             )
             # Bound FiLM scale and shift with tanh so 36 stacked blocks cannot overflow FP16
-            x = x * (1.0 + 0.25 * torch.tanh(scale1)) + 2.0 * torch.tanh(shift1)
-        else:
-            scale2, shift2 = None, None
+            x = x * (1.0 + 0.25 * torch.tanh(scale)) + 2.0 * torch.tanh(shift)
 
         x = self.pw1(x)
         x = self.dwconv(x)
@@ -194,8 +192,6 @@ class NAFBlock(nn.Module):
         x = residual + x * self.beta
 
         y = self.norm2(x)
-        if scale2 is not None:
-            y = y * (1.0 + 0.25 * torch.tanh(scale2)) + 2.0 * torch.tanh(shift2)
         y = self.pw3(y)
         y = self.sg2(y)
         y = self.pw4(y)
