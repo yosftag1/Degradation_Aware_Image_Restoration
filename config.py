@@ -24,7 +24,7 @@ class Config:
         "jpeg_compression",
         "color_degradation",
         "exposure_issue",
-        "atmospheric_haze",
+        "color_banding",
         "downsample_upsample",
         "defocus_blur",
     ]
@@ -74,8 +74,7 @@ class Config:
     GAMMA_RANGE = (0.55, 1.85)  # Scaled by severity in dataset.py
     DOWNSAMPLE_SCALE_RANGE = (0.25, 0.75)
     DEFOCUS_KERNEL_RANGE = (3, 17)
-    HAZE_BETA_RANGE = (0.6, 2.2)        # Atmospheric scattering coefficient beta
-    HAZE_AIRLIGHT_RANGE = (0.75, 0.98)  # Atmospheric airlight intensity A
+    BANDING_LEVELS_RANGE = (6, 26)      # Quantization levels (26=mild contour steps, 6=severe banding without neon hue shifts)
 
     # Keep boosts at 1.0 so all 5 severity levels [0.2, 0.4, 0.6, 0.8, 1.0] stay distinct and learnable
     DEGRADATION_SEVERITY_BOOSTS = {
@@ -84,7 +83,7 @@ class Config:
         "jpeg_compression": 1.0,
         "color_degradation": 1.0,
         "exposure_issue": 1.0,
-        "atmospheric_haze": 1.0,
+        "color_banding": 1.0,
         "downsample_upsample": 1.0,
         "defocus_blur": 1.0,
     }

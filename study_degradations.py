@@ -117,34 +117,25 @@ def apply_down_up_sample(image, severity, min_scale=0.25, max_scale=0.75):
     return up
 
 
-def apply_atmospheric_haze(image, severity, beta_range=(0.6, 2.2), airlight_range=(0.75, 0.98)):
-    """Apply Koschmieder physical atmospheric scattering haze: I(x) = J(x)*t(x) + A*(1 - t(x))."""
-    h, w = image.shape[:2]
-    image_float = image.astype(np.float32) / 255.0
+def apply_color_banding(image, severity, levels_range=(6, 26)):
+    """Apply bit-depth quantization (color banding / false contouring) in smooth gradients."""
+    min_levels, max_levels = levels_range
+    min_bits = np.log2(float(min_levels))
+    max_bits = np.log2(float(max_levels))
+    bits = max_bits - severity * (max_bits - min_bits)
+    levels = max(4, int(round(2.0 ** bits)))
 
-    min_beta, max_beta = beta_range
-    min_A, max_A = airlight_range
-    beta = min_beta + severity * (max_beta - min_beta)
+    sigma_color = 8.0 + 18.0 * severity
+    smoothed = cv2.bilateralFilter(image, d=5, sigmaColor=sigma_color, sigmaSpace=5)
 
-    y_grad = np.linspace(0.95, 0.30, h, dtype=np.float32)[:, None]
-    x_freq = random.uniform(1.0, 2.5)
-    x_phase = random.uniform(0.0, 2.0 * np.pi)
-    x_wave = 0.12 * np.sin(np.linspace(0.0, x_freq * np.pi, w, dtype=np.float32) + x_phase)[None, :]
-    depth = np.clip(y_grad + x_wave, 0.2, 1.0)[:, :, None]
-
-    transmission = np.exp(-beta * depth)
-    base_A = random.uniform(min_A, max_A)
-    airlight = np.array(
-        [
-            np.clip(base_A + random.uniform(-0.04, 0.04), 0.7, 1.0),
-            np.clip(base_A + random.uniform(-0.03, 0.03), 0.7, 1.0),
-            np.clip(base_A + random.uniform(-0.04, 0.05), 0.7, 1.0),
-        ],
-        dtype=np.float32,
-    ).reshape(1, 1, 3)
-
-    hazy = image_float * transmission + airlight * (1.0 - transmission)
-    return np.clip(hazy * 255.0, 0, 255).astype(np.uint8)
+    lab = cv2.cvtColor(smoothed, cv2.COLOR_RGB2LAB).astype(np.float32)
+    l_step = 255.0 / float(levels - 1)
+    ab_step = 255.0 / float(max(6, levels * 2) - 1)
+    lab[:, :, 0] = np.round(lab[:, :, 0] / l_step) * l_step
+    lab[:, :, 1] = np.round((lab[:, :, 1] - 128.0) / ab_step) * ab_step + 128.0
+    lab[:, :, 2] = np.round((lab[:, :, 2] - 128.0) / ab_step) * ab_step + 128.0
+    lab = np.clip(lab, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
 
 
 def save_image(path, image_rgb):
@@ -182,7 +173,7 @@ def main():
         "jpeg_compression": lambda img, s: apply_jpeg_compression(img, s, *config.JPEG_QUALITY_RANGE),
         "color_degradation": apply_color_degradation,
         "exposure_issue": apply_exposure_issue,
-        "atmospheric_haze": apply_atmospheric_haze,
+        "color_banding": lambda img, s: apply_color_banding(img, s, config.BANDING_LEVELS_RANGE),
         "downsample_upsample": apply_down_up_sample,
         "defocus_blur": apply_defocus_blur,
     }

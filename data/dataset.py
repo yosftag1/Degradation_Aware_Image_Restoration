@@ -9,15 +9,15 @@ import random
 class DegradationPipeline:
     """Applies single or physically ordered compound degradations (1 to 3) to images."""
 
-    # Physical camera pipeline order: Scene -> Optics -> Radiometric -> Sampling -> Sensor Noise -> Compression
+    # Physical camera pipeline order: Optics -> Radiometric -> Sampling -> Sensor Noise -> Quantization & Compression
     PHYSICAL_ORDER = [
-        "atmospheric_haze",
         "defocus_blur",
         "motion_blur",
         "exposure_issue",
         "color_degradation",
         "downsample_upsample",
         "gaussian_noise",
+        "color_banding",
         "jpeg_compression",
     ]
     
@@ -121,36 +121,29 @@ class DegradationPipeline:
         degraded = np.clip(degraded * 255.0, 0, 255).astype(np.uint8)
         return degraded, "exposure_issue"
 
-    def apply_atmospheric_haze(self, image, severity):
-        """Apply physical Koschmieder atmospheric scattering haze: I(x) = J(x)*t(x) + A*(1 - t(x))."""
-        h, w = image.shape[:2]
-        image_float = image.astype(np.float32) / 255.0
+    def apply_color_banding(self, image, severity):
+        """Apply bit-depth quantization (color banding / false contouring) in smooth gradients."""
+        min_levels, max_levels = getattr(self.config, "BANDING_LEVELS_RANGE", (6, 26))
+        # Exponential interpolation in bit-depth space so mild/medium/severe steps are visually uniform
+        min_bits = np.log2(float(min_levels))
+        max_bits = np.log2(float(max_levels))
+        bits = max_bits - severity * (max_bits - min_bits)
+        levels = max(4, int(round(2.0 ** bits)))
 
-        min_beta, max_beta = getattr(self.config, "HAZE_BETA_RANGE", (0.6, 2.2))
-        min_A, max_A = getattr(self.config, "HAZE_AIRLIGHT_RANGE", (0.75, 0.98))
-        beta = min_beta + severity * (max_beta - min_beta)
+        # Edge-preserving bilateral pre-filter removes micro-dither so quantization forms true contour bands
+        sigma_color = 8.0 + 18.0 * severity
+        smoothed = cv2.bilateralFilter(image, d=5, sigmaColor=sigma_color, sigmaSpace=5)
 
-        # Construct smooth spatial depth map d(x) in [0.25, 1.0]
-        y_grad = np.linspace(0.95, 0.30, h, dtype=np.float32)[:, None]
-        x_freq = random.uniform(1.0, 2.5)
-        x_phase = random.uniform(0.0, 2.0 * np.pi)
-        x_wave = 0.12 * np.sin(np.linspace(0.0, x_freq * np.pi, w, dtype=np.float32) + x_phase)[None, :]
-        depth = np.clip(y_grad + x_wave, 0.2, 1.0)[:, :, None]
-
-        # Transmission map t(x) = exp(-beta * d(x))
-        transmission = np.exp(-beta * depth)
-
-        # Slightly warm or cool atmospheric airlight vector A
-        base_A = random.uniform(min_A, max_A)
-        airlight = np.array([
-            np.clip(base_A + random.uniform(-0.04, 0.04), 0.7, 1.0),
-            np.clip(base_A + random.uniform(-0.03, 0.03), 0.7, 1.0),
-            np.clip(base_A + random.uniform(-0.04, 0.05), 0.7, 1.0),
-        ], dtype=np.float32).reshape(1, 1, 3)
-
-        hazy = image_float * transmission + airlight * (1.0 - transmission)
-        degraded = np.clip(hazy * 255.0, 0, 255).astype(np.uint8)
-        return degraded, "atmospheric_haze"
+        # Quantize in CIE LAB space so luminance steps form natural tonal contour bands without false neon RGB splits
+        lab = cv2.cvtColor(smoothed, cv2.COLOR_RGB2LAB).astype(np.float32)
+        l_step = 255.0 / float(levels - 1)
+        ab_step = 255.0 / float(max(6, levels * 2) - 1)
+        lab[:, :, 0] = np.round(lab[:, :, 0] / l_step) * l_step
+        lab[:, :, 1] = np.round((lab[:, :, 1] - 128.0) / ab_step) * ab_step + 128.0
+        lab[:, :, 2] = np.round((lab[:, :, 2] - 128.0) / ab_step) * ab_step + 128.0
+        lab = np.clip(lab, 0, 255).astype(np.uint8)
+        degraded = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        return degraded, "color_banding"
 
     def apply_downsample_upsample(self, image, severity):
         """Downsample then upsample to simulate resolution loss."""
@@ -236,8 +229,8 @@ class DegradationPipeline:
             degraded, _ = self.apply_color_degradation(image, severity)
         elif deg_type_name == "exposure_issue":
             degraded, _ = self.apply_exposure_issue(image, severity)
-        elif deg_type_name == "atmospheric_haze":
-            degraded, _ = self.apply_atmospheric_haze(image, severity)
+        elif deg_type_name == "color_banding":
+            degraded, _ = self.apply_color_banding(image, severity)
         elif deg_type_name == "downsample_upsample":
             degraded, _ = self.apply_downsample_upsample(image, severity)
         elif deg_type_name == "defocus_blur":

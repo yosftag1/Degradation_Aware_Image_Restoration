@@ -296,7 +296,7 @@ def save_validation_samples(model, device, config, val_dataset, eval_indices, ep
         # 8 single degradations + 2 compound multi-degradation test rows
         eval_recipes = [(deg_name, {deg_name: 1.0}) for deg_name in config.DEGRADATION_TYPES] + [
             ("compound_blur+noise", {"motion_blur": 0.85, "gaussian_noise": 0.75}),
-            ("compound_haze+jpeg", {"atmospheric_haze": 0.85, "gaussian_noise": 0.50, "jpeg_compression": 0.75}),
+            ("compound_band+jpeg", {"color_banding": 0.85, "exposure_issue": 0.60, "jpeg_compression": 0.75}),
         ]
 
         for row_label, recipe in eval_recipes:
