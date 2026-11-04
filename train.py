@@ -347,7 +347,7 @@ def train_epoch(model, train_loader, loss_fn, optimizer, scaler, device, config,
     use_amp = getattr(config, "USE_AMP", True) and (device.type == "cuda")
     total_loss = 0.0
     loss_components = {
-        'l1': 0.0, 'perceptual': 0.0, 'frequency': 0.0,
+        'l1': 0.0, 'gradient': 0.0, 'perceptual': 0.0, 'frequency': 0.0,
         'deg_type': 0.0, 'severity': 0.0
     }
     
@@ -418,7 +418,7 @@ def validate(model, val_loader, loss_fn, device, config, val_dataset, eval_indic
     use_amp = getattr(config, "USE_AMP", True) and (device.type == "cuda")
     total_loss = 0.0
     loss_components = {
-        'l1': 0.0, 'perceptual': 0.0, 'frequency': 0.0,
+        'l1': 0.0, 'gradient': 0.0, 'perceptual': 0.0, 'frequency': 0.0,
         'deg_type': 0.0, 'severity': 0.0
     }
 

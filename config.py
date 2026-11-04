@@ -99,6 +99,7 @@ class Config:
     
     # Loss weights
     LOSS_L1_WEIGHT = 1.0
+    LOSS_GRADIENT_WEIGHT = 0.15
     LOSS_PERCEPTUAL_WEIGHT = 0.1
     LOSS_FREQUENCY_WEIGHT = 0.05
     

@@ -368,9 +368,10 @@ class DegradationEstimator(nn.Module):
 
         hidden = self.head_mlp(stats)
         deg_type = self.fc_type(hidden)
-        # Gate predicted severity by sigmoid so s_hat is in [0, 1]^8
-        severity = torch.sigmoid(self.fc_severity(hidden))
         deg_probs = torch.sigmoid(deg_type)
+        raw_severity = torch.sigmoid(self.fc_severity(hidden))
+        # Couple predicted 8D severity vector with presence probability so inactive slots naturally vanish
+        severity = deg_probs * raw_severity
 
         emb_in = torch.cat([hidden, deg_probs, severity], dim=1)
         embedding = self.fc_embedding(emb_in)

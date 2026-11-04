@@ -75,39 +75,65 @@ class PerceptualLoss(nn.Module):
         return self.loss_fn(x_feat, y_feat)
 
 
+class CharbonnierLoss(nn.Module):
+    """Smooth L1 / Charbonnier loss: sqrt((x - y)^2 + eps^2), standard in NAFNet/Restormer."""
+
+    def __init__(self, eps=1e-3):
+        super().__init__()
+        self.eps2 = eps * eps
+
+    def forward(self, x, y):
+        diff = x.float() - y.float()
+        return torch.mean(torch.sqrt(diff * diff + self.eps2))
+
+
+class SpatialGradientLoss(nn.Module):
+    """First-order spatial derivative (dx, dy) L1 loss to erase color banding steps and JPEG block boundaries."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, y):
+        x_f = x.float()
+        y_f = y.float()
+        dx_x = x_f[:, :, :, 1:] - x_f[:, :, :, :-1]
+        dx_y = y_f[:, :, :, 1:] - y_f[:, :, :, :-1]
+        dy_x = x_f[:, :, 1:, :] - x_f[:, :, :-1, :]
+        dy_y = y_f[:, :, 1:, :] - y_f[:, :, :-1, :]
+        return F.l1_loss(dx_x, dx_y) + F.l1_loss(dy_x, dy_y)
+
+
 class FrequencyLoss(nn.Module):
-    """Frequency domain loss using FFT magnitude."""
+    """3-channel RGB frequency domain loss supervising both amplitude spectrum and spatial phase."""
     
     def __init__(self):
         super().__init__()
         self.loss_fn = nn.L1Loss()
     
     def forward(self, x, y):
-        """Compute frequency loss between x and y (cast to float32 for cuFFT stability under AMP)."""
-        # Convert to float32 grayscale for frequency analysis
-        x_gray = x.float().mean(dim=1, keepdim=True)  # [B, 1, H, W]
-        y_gray = y.float().mean(dim=1, keepdim=True)
+        """Compute RGB 2D FFT magnitude + complex phase loss (cast to float32 for cuFFT stability under AMP)."""
+        x_f = x.float()
+        y_f = y.float()
         
-        # Compute orthonormal 2D FFT so frequency magnitudes match pixel [0, 1] scale
-        x_fft = torch.fft.rfft2(x_gray.squeeze(1), norm="ortho")  # [B, H, W//2+1]
-        y_fft = torch.fft.rfft2(y_gray.squeeze(1), norm="ortho")
+        # Orthonormal 2D FFT across all 3 RGB channels [B, 3, H, W//2+1]
+        x_fft = torch.fft.rfft2(x_f, norm="ortho")
+        y_fft = torch.fft.rfft2(y_f, norm="ortho")
         
-        # Magnitude spectrum
-        x_mag = torch.abs(x_fft)
-        y_mag = torch.abs(y_fft)
-        
-        # L1 loss on magnitude
-        return self.loss_fn(x_mag, y_mag)
+        # Magnitude spectrum L1 + complex (real & imaginary phase-preserving) L1
+        mag_loss = self.loss_fn(torch.abs(x_fft), torch.abs(y_fft))
+        complex_loss = torch.view_as_real(x_fft - y_fft).abs().mean()
+        return 0.5 * mag_loss + 0.5 * complex_loss
 
 
 class RestorationLoss(nn.Module):
-    """Combined loss: L1 + Perceptual + Frequency."""
+    """Combined loss: Charbonnier + SpatialGradient + Perceptual + 3-Channel Frequency + Positive-Weighted 8D Estimator."""
     
     def __init__(self, config, device="cuda"):
         super().__init__()
         self.config = config
         
-        self.l1_loss = nn.L1Loss()
+        self.l1_loss = CharbonnierLoss(eps=1e-3)
+        self.gradient_loss = SpatialGradientLoss()
         self.perceptual_loss = PerceptualLoss(
             layer=config.PERCEPTUAL_LAYERS[0],
             device=device,
@@ -115,9 +141,8 @@ class RestorationLoss(nn.Module):
         )
         self.frequency_loss = FrequencyLoss()
         
-        # Multi-degradation presence (BCEWithLogits) and 8D continuous severity vector (MSE) losses
-        self.bce_loss = nn.BCEWithLogitsLoss()
-        self.sev_loss = nn.MSELoss()
+        # Positive-weighted multi-label BCE (pos_weight=3.0 balances ~22% active vs ~78% inactive slots)
+        self.register_buffer("pos_weight", torch.tensor(3.0, device=device))
     
     def forward(self, restored, clean, deg_type, deg_type_target, 
                 severity, severity_target, deg_embedding=None):
@@ -133,6 +158,7 @@ class RestorationLoss(nn.Module):
         """
         # Restoration losses
         loss_l1 = self.l1_loss(restored, clean)
+        loss_gradient = self.gradient_loss(restored, clean)
         loss_perceptual = self.perceptual_loss(restored, clean)
         loss_frequency = self.frequency_loss(restored, clean)
         
@@ -149,13 +175,22 @@ class RestorationLoss(nn.Module):
         else:
             severity_target = severity_target.float()
 
-        # Multi-degradation estimation losses
-        loss_deg_type = self.bce_loss(deg_type.float(), deg_type_target)
-        loss_severity = self.sev_loss(severity.float(), severity_target)
+        # Positive-weighted multi-degradation presence loss
+        pos_w = self.pos_weight.to(deg_type.device)
+        loss_deg_type = F.binary_cross_entropy_with_logits(
+            deg_type.float(), deg_type_target, pos_weight=pos_w
+        )
+
+        # Active-weighted severity MSE (weights active degradations 4x so inactive zeros don't dominate)
+        sev_weights = 1.0 + 3.0 * (deg_type_target > 0.5).float()
+        loss_severity = torch.mean(sev_weights * ((severity.float() - severity_target) ** 2))
         
+        grad_weight = getattr(self.config, "LOSS_GRADIENT_WEIGHT", 0.15)
+
         # Weighted sum
         total_loss = (
             self.config.LOSS_L1_WEIGHT * loss_l1 +
+            grad_weight * loss_gradient +
             self.config.LOSS_PERCEPTUAL_WEIGHT * loss_perceptual +
             self.config.LOSS_FREQUENCY_WEIGHT * loss_frequency +
             0.05 * loss_deg_type +
@@ -164,6 +199,7 @@ class RestorationLoss(nn.Module):
         
         loss_dict = {
             'l1': loss_l1.item(),
+            'gradient': loss_gradient.item(),
             'perceptual': loss_perceptual.item(),
             'frequency': loss_frequency.item(),
             'deg_type': loss_deg_type.item(),
