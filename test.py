@@ -139,8 +139,8 @@ def test_dataset_creation(data_dir="./data/DIV2K"):
         print(f"✓ Sample shapes:")
         print(f"  - Degraded: {sample['degraded'].shape}")
         print(f"  - Clean: {sample['clean'].shape}")
-        print(f"  - Deg type: {sample['deg_type'].item()} ({config.DEGRADATION_TYPES[sample['deg_type'].item()]})")
-        print(f"  - Severity: {sample['severity'].item()}")
+        print(f"  - Deg mask (8D): {sample['deg_type'].tolist()}")
+        print(f"  - Severity vector (8D): {[round(v, 2) for v in sample['severity'].tolist()]}")
         
     except Exception as e:
         print(f"✗ Error: {e}")

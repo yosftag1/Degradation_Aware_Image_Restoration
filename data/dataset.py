@@ -290,10 +290,12 @@ class ImageRestorationDataset(torch.utils.data.Dataset):
         else:
             # Center crop or resize for validation
             h, w = clean_image.shape[:2]
-            size = min(h, w, self.patch_size)
-            y = (h - size) // 2
-            x = (w - size) // 2
-            clean_image = clean_image[y:y+size, x:x+size]
+            if h >= self.patch_size and w >= self.patch_size:
+                y = (h - self.patch_size) // 2
+                x = (w - self.patch_size) // 2
+                clean_image = clean_image[y:y+self.patch_size, x:x+self.patch_size]
+            else:
+                clean_image = cv2.resize(clean_image, (self.patch_size, self.patch_size))
         
         # Apply single or compound degradation (returns 8D mask and 8D continuous severity vector)
         degraded_image, deg_mask, severity_vec = self.degradation_pipeline.apply_degradation(clean_image)
@@ -381,5 +383,10 @@ if __name__ == "__main__":
     
     # Apply degradations
     for i in range(3):
-        degraded, deg_type, severity = pipeline.apply_degradation(test_image)
-        print(f"Degradation type: {config.DEGRADATION_TYPES[deg_type]}, Severity level: {severity}")
+        degraded, deg_mask, severity_vec = pipeline.apply_degradation(test_image)
+        active = [
+            f"{config.DEGRADATION_TYPES[idx]}:{severity_vec[idx]:.2f}"
+            for idx in range(len(config.DEGRADATION_TYPES))
+            if deg_mask[idx] > 0.5
+        ]
+        print(f"Sample {i + 1}: {', '.join(active)}")

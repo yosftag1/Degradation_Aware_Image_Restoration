@@ -207,10 +207,11 @@ def _load_clean_image(image_path, config):
         raise FileNotFoundError(f"Image not found: {image_path}")
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     h, w = image.shape[:2]
-    size = min(h, w, config.PATCH_SIZE)
-    y = (h - size) // 2
-    x = (w - size) // 2
-    return image[y:y + size, x:x + size]
+    if h >= config.PATCH_SIZE and w >= config.PATCH_SIZE:
+        y = (h - config.PATCH_SIZE) // 2
+        x = (w - config.PATCH_SIZE) // 2
+        return image[y:y + config.PATCH_SIZE, x:x + config.PATCH_SIZE]
+    return cv2.resize(image, (config.PATCH_SIZE, config.PATCH_SIZE))
 
 
 def _render_single_image_grid(clean_image, deg_rows, severities, title_text):
