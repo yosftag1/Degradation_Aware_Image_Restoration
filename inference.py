@@ -89,13 +89,26 @@ class Inferencer:
         restored_np = (restored[0].permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
         
         if return_degradation_info:
-            deg_type_pred = deg_type[0].argmax().item()
-            severity_pred = severity[0].argmax().item()
-            
+            probs = torch.sigmoid(deg_type[0]).cpu().numpy()
+            sev_vec = severity[0].cpu().numpy()
+            top_idx = int(np.argmax(probs))
+
+            active_degs = {
+                self.config.DEGRADATION_TYPES[i]: round(float(sev_vec[i]), 3)
+                for i in range(len(self.config.DEGRADATION_TYPES))
+                if probs[i] >= 0.35
+            }
+            if not active_degs:
+                active_degs = {self.config.DEGRADATION_TYPES[top_idx]: round(float(sev_vec[top_idx]), 3)}
+
             degradation_info = {
-                'type': self.config.DEGRADATION_TYPES[deg_type_pred],
-                'severity_level': severity_pred,
-                'severity_value': (severity_pred + 1) * 0.2,  # 0.2 to 1.0
+                'primary_type': self.config.DEGRADATION_TYPES[top_idx],
+                'primary_severity': round(float(sev_vec[top_idx]), 3),
+                'detected_degradations': active_degs,
+                'severity_vector': {
+                    self.config.DEGRADATION_TYPES[i]: round(float(sev_vec[i]), 3)
+                    for i in range(len(self.config.DEGRADATION_TYPES))
+                },
                 'bridge_type': self.model.bridge.bridge_type,
                 'bridge_steps': steps or self.model.default_steps,
             }

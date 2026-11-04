@@ -115,8 +115,9 @@ class RestorationLoss(nn.Module):
         )
         self.frequency_loss = FrequencyLoss()
         
-        # Degradation classification loss
-        self.ce_loss = nn.CrossEntropyLoss()
+        # Multi-degradation presence (BCEWithLogits) and 8D continuous severity vector (MSE) losses
+        self.bce_loss = nn.BCEWithLogitsLoss()
+        self.sev_loss = nn.MSELoss()
     
     def forward(self, restored, clean, deg_type, deg_type_target, 
                 severity, severity_target, deg_embedding=None):
@@ -124,32 +125,41 @@ class RestorationLoss(nn.Module):
         Args:
             restored: Restored image [B, 3, H, W]
             clean: Clean ground truth [B, 3, H, W]
-            deg_type: Predicted degradation type logits [B, num_types]
-            deg_type_target: Target degradation type [B]
-            severity: Predicted severity logits [B, severity_levels]
-            severity_target: Target severity level [B]
+            deg_type: Predicted multi-label degradation presence logits [B, num_types]
+            deg_type_target: Target binary mask [B, num_types] (or 1D class index [B])
+            severity: Predicted 8D severity vector s_hat in [0, 1]^K [B, num_types]
+            severity_target: Target 8D severity vector s in [0, 1]^K [B, num_types]
             deg_embedding: Degradation embedding (unused, for future extensions)
-        
-        Returns:
-            loss_dict: Dictionary with individual loss components
-            total_loss: Weighted sum of losses
         """
         # Restoration losses
         loss_l1 = self.l1_loss(restored, clean)
         loss_perceptual = self.perceptual_loss(restored, clean)
         loss_frequency = self.frequency_loss(restored, clean)
         
-        # Degradation estimation losses
-        loss_deg_type = self.ce_loss(deg_type, deg_type_target)
-        loss_severity = self.ce_loss(severity, severity_target)
+        # Support both 8D vector targets [B, K] and legacy 1D class indices [B]
+        num_types = deg_type.shape[-1]
+        if deg_type_target.dim() == 1:
+            deg_type_target = F.one_hot(deg_type_target.long(), num_classes=num_types).float()
+        else:
+            deg_type_target = deg_type_target.float()
+
+        if severity_target.dim() == 1:
+            sev_scalar = (severity_target.float() + 1.0) / float(self.config.SEVERITY_LEVELS)
+            severity_target = deg_type_target * sev_scalar.unsqueeze(1)
+        else:
+            severity_target = severity_target.float()
+
+        # Multi-degradation estimation losses
+        loss_deg_type = self.bce_loss(deg_type.float(), deg_type_target)
+        loss_severity = self.sev_loss(severity.float(), severity_target)
         
         # Weighted sum
         total_loss = (
             self.config.LOSS_L1_WEIGHT * loss_l1 +
             self.config.LOSS_PERCEPTUAL_WEIGHT * loss_perceptual +
             self.config.LOSS_FREQUENCY_WEIGHT * loss_frequency +
-            0.1 * loss_deg_type +  # Smaller weight for auxiliary task
-            0.05 * loss_severity
+            0.05 * loss_deg_type +
+            0.10 * loss_severity
         )
         
         loss_dict = {

@@ -69,12 +69,13 @@ def test_degradation_pipeline():
     image = np.random.randint(0, 256, (256, 256, 3), dtype=np.uint8)
     
     for i in range(3):
-        degraded, deg_type, severity = pipeline.apply_degradation(image)
-        
-        deg_name = config.DEGRADATION_TYPES[deg_type]
-        severity_val = pipeline.severity_levels[severity]
-        
-        print(f"✓ Test {i+1}: {deg_name} (severity={severity_val:.1f})")
+        degraded, deg_mask, severity_vec = pipeline.apply_degradation(image)
+        active = [
+            f"{config.DEGRADATION_TYPES[idx]}:{severity_vec[idx]:.2f}"
+            for idx in range(len(config.DEGRADATION_TYPES))
+            if deg_mask[idx] > 0.5
+        ]
+        print(f"✓ Test {i+1}: {', '.join(active)}")
     
     print()
 
@@ -94,9 +95,9 @@ def test_loss_functions():
     restored = torch.randn(B, C, H, W).clamp(0, 1).to(device)
     clean = torch.randn(B, C, H, W).clamp(0, 1).to(device)
     deg_type = torch.randn(B, num_deg, device=device)
-    deg_type_target = torch.randint(0, num_deg, (B,), device=device)
-    severity = torch.randn(B, config.SEVERITY_LEVELS, device=device)
-    severity_target = torch.randint(0, config.SEVERITY_LEVELS, (B,), device=device)
+    deg_type_target = torch.randint(0, 2, (B, num_deg), device=device).float()
+    severity = torch.rand(B, num_deg, device=device)
+    severity_target = deg_type_target * torch.rand(B, num_deg, device=device)
     
     total_loss, loss_dict = loss_fn(
         restored, clean, deg_type, deg_type_target,
@@ -163,8 +164,8 @@ def test_model_training_step():
     num_deg = len(config.DEGRADATION_TYPES)
     degraded = torch.randn(B, C, H, W).clamp(0, 1).to(device)
     clean = torch.randn(B, C, H, W).clamp(0, 1).to(device)
-    deg_type_target = torch.randint(0, num_deg, (B,), device=device)
-    severity_target = torch.randint(0, config.SEVERITY_LEVELS, (B,), device=device)
+    deg_type_target = torch.randint(0, 2, (B, num_deg), device=device).float()
+    severity_target = deg_type_target * torch.rand(B, num_deg, device=device)
     
     # Forward pass (bridge training step)
     restored, deg_type, severity, deg_embedding = model(degraded, clean=clean)

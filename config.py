@@ -31,6 +31,8 @@ class Config:
     DEGRADATION_EMBEDDING_DIM = 32
     SEVERITY_LEVELS = 5
     MIN_SEVERITY = 0.2
+    MAX_COMPOUND_DEGRADATIONS = 3  # Chain 1 to 3 degradations in physical camera order
+    COMPOUND_PROB = 0.6            # 60% of training samples combine 2-3 degradations, 40% single
 
     # Physics / Stochastic Bridge settings (I2SB, Brownian Bridge, Flow Matching)
     BRIDGE_TYPE = "i2sb"          # Options: "i2sb", "brownian", "flow"

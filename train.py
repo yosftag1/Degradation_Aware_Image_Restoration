@@ -293,10 +293,17 @@ def save_validation_samples(model, device, config, val_dataset, eval_indices, ep
         clean_image = _load_clean_image(image_path, config)
         deg_rows = []
 
-        for deg_name in config.DEGRADATION_TYPES:
+        # 8 single degradations + 2 compound multi-degradation test rows
+        eval_recipes = [(deg_name, {deg_name: 1.0}) for deg_name in config.DEGRADATION_TYPES] + [
+            ("compound_blur+noise", {"motion_blur": 0.85, "gaussian_noise": 0.75}),
+            ("compound_haze+jpeg", {"atmospheric_haze": 0.85, "gaussian_noise": 0.50, "jpeg_compression": 0.75}),
+        ]
+
+        for row_label, recipe in eval_recipes:
             degraded_list = []
             for severity in severities:
-                degraded = pipeline.apply_named_degradation(clean_image, deg_name, float(severity))
+                scaled_recipe = {k: float(severity) * w for k, w in recipe.items()}
+                degraded = pipeline.apply_compound_degradation(clean_image, scaled_recipe)
                 degraded_list.append(degraded)
 
             degraded_batch = (
@@ -311,7 +318,7 @@ def save_validation_samples(model, device, config, val_dataset, eval_indices, ep
             ).astype(np.uint8)
 
             pairs = list(zip(degraded_list, restored_batch_np))
-            deg_rows.append((deg_name, pairs))
+            deg_rows.append((row_label, pairs))
 
         title = (
             f"Epoch {epoch:03d} | Sample {local_idx + 1}/{len(eval_indices)} "

@@ -326,13 +326,13 @@ class NAFNetBackbone(nn.Module):
 
 
 class DegradationEstimator(nn.Module):
-    """Predicts degradation type, severity, and conditioning embedding from degraded input x_1.
+    """Predicts multi-degradation presence logits, 8D severity vector s in [0,1]^8, and conditioning embedding.
 
-    Uses both Global Mean and Global Standard Deviation pooling so the estimator can
-    directly measure high-frequency noise variance, blur smoothness, and color/exposure statistics.
+    Uses Global Mean + Global Standard Deviation pooling so the estimator can
+    simultaneously detect multiple active degradations and their individual severities.
     """
 
-    def __init__(self, num_degradations=3, severity_levels=5, embedding_dim=32):
+    def __init__(self, num_degradations=8, severity_levels=5, embedding_dim=32):
         super().__init__()
         self.num_degradations = num_degradations
         self.severity_levels = severity_levels
@@ -348,9 +348,12 @@ class DegradationEstimator(nn.Module):
             nn.SiLU(),
         )
 
+        # Multi-label presence logits [B, num_degradations]
         self.fc_type = nn.Linear(128, num_degradations)
-        self.fc_severity = nn.Linear(128, severity_levels)
-        self.fc_embedding = nn.Linear(128, embedding_dim)
+        # Continuous per-degradation severity vector s in [0, 1]^K [B, num_degradations]
+        self.fc_severity = nn.Linear(128, num_degradations)
+        # Conditioning embedding combines hidden features + predicted presence + severity vector
+        self.fc_embedding = nn.Linear(128 + 2 * num_degradations, embedding_dim)
 
     def forward(self, x):
         x = F.silu(self.conv1(x))
@@ -365,8 +368,12 @@ class DegradationEstimator(nn.Module):
 
         hidden = self.head_mlp(stats)
         deg_type = self.fc_type(hidden)
-        severity = self.fc_severity(hidden)
-        embedding = self.fc_embedding(hidden)
+        # Gate predicted severity by sigmoid so s_hat is in [0, 1]^8
+        severity = torch.sigmoid(self.fc_severity(hidden))
+        deg_probs = torch.sigmoid(deg_type)
+
+        emb_in = torch.cat([hidden, deg_probs, severity], dim=1)
+        embedding = self.fc_embedding(emb_in)
 
         return deg_type, severity, embedding
 

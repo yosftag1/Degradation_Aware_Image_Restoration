@@ -7,13 +7,27 @@ import random
 
 
 class DegradationPipeline:
-    """Applies random combinations of degradations to images."""
+    """Applies single or physically ordered compound degradations (1 to 3) to images."""
+
+    # Physical camera pipeline order: Scene -> Optics -> Radiometric -> Sampling -> Sensor Noise -> Compression
+    PHYSICAL_ORDER = [
+        "atmospheric_haze",
+        "defocus_blur",
+        "motion_blur",
+        "exposure_issue",
+        "color_degradation",
+        "downsample_upsample",
+        "gaussian_noise",
+        "jpeg_compression",
+    ]
     
     def __init__(self, config):
         self.config = config
         self.degradation_types = config.DEGRADATION_TYPES
         min_severity = getattr(config, "MIN_SEVERITY", 0.2)
         self.severity_levels = np.linspace(min_severity, 1.0, config.SEVERITY_LEVELS)
+        self.max_compound = getattr(config, "MAX_COMPOUND_DEGRADATIONS", 3)
+        self.compound_prob = getattr(config, "COMPOUND_PROB", 0.6)
 
     def _adjust_severity(self, deg_type_name, severity):
         boost = self.config.DEGRADATION_SEVERITY_BOOSTS.get(deg_type_name, 1.0)
@@ -157,42 +171,56 @@ class DegradationPipeline:
         blurred = cv2.GaussianBlur(image, (ksize, ksize), 0)
         return blurred, "defocus_blur"
     
+    def apply_compound_degradation(self, image, deg_severity_map):
+        """Apply a dictionary of {deg_name: severity} in physical camera pipeline order."""
+        order_Rank = {name: i for i, name in enumerate(self.PHYSICAL_ORDER)}
+        sorted_items = sorted(deg_severity_map.items(), key=lambda kv: order_Rank.get(kv[0], 99))
+        degraded = image.copy()
+        for deg_name, sev in sorted_items:
+            degraded = self.apply_named_degradation(degraded, deg_name, float(sev))
+        return degraded
+
     def apply_degradation(self, image):
-        """Apply random degradation to image.
+        """Apply 1 to 3 degradations in physical order and return 8D severity vector s in [0, 1]^8.
         
         Returns:
-            degraded_image: Degraded image array
-            deg_type: Degradation type (0, 1, or 2)
-            severity_level: Severity level index (0-4)
+            degraded_image: Degraded image array (uint8 RGB)
+            deg_mask: 8D float32 binary mask indicating active degradations [num_degradations]
+            severity_vec: 8D float32 severity vector in [0, 1]^8 [num_degradations]
         """
-        # Random degradation type and severity
-        deg_type_idx = random.randint(0, len(self.degradation_types) - 1)
-        severity_idx = random.randint(0, len(self.severity_levels) - 1)
-        severity = self.severity_levels[severity_idx]
-        
-        deg_type_name = self.degradation_types[deg_type_idx]
-        severity = self._adjust_severity(deg_type_name, severity)
-        
-        if deg_type_name == "gaussian_noise":
-            degraded, _ = self.apply_gaussian_noise(image, severity)
-        elif deg_type_name == "motion_blur":
-            degraded, _ = self.apply_motion_blur(image, severity)
-        elif deg_type_name == "jpeg_compression":
-            degraded, _ = self.apply_jpeg_compression(image, severity)
-        elif deg_type_name == "color_degradation":
-            degraded, _ = self.apply_color_degradation(image, severity)
-        elif deg_type_name == "exposure_issue":
-            degraded, _ = self.apply_exposure_issue(image, severity)
-        elif deg_type_name == "atmospheric_haze":
-            degraded, _ = self.apply_atmospheric_haze(image, severity)
-        elif deg_type_name == "downsample_upsample":
-            degraded, _ = self.apply_downsample_upsample(image, severity)
-        elif deg_type_name == "defocus_blur":
-            degraded, _ = self.apply_defocus_blur(image, severity)
+        num_types = len(self.degradation_types)
+        if self.max_compound > 1 and random.random() < self.compound_prob:
+            k = 2 if (self.max_compound == 2 or random.random() < 0.7) else min(3, self.max_compound)
         else:
-            raise ValueError(f"Unknown degradation type: {deg_type_name}")
-        
-        return degraded, deg_type_idx, severity_idx
+            k = 1
+
+        chosen_indices = random.sample(range(num_types), k=min(k, num_types))
+        chosen_names = [self.degradation_types[i] for i in chosen_indices]
+
+        # Avoid stacking two spatial blurs together if both motion_blur and defocus_blur were sampled
+        if "motion_blur" in chosen_names and "defocus_blur" in chosen_names and len(chosen_indices) > 1:
+            drop_name = random.choice(["motion_blur", "defocus_blur"])
+            drop_idx = self.degradation_types.index(drop_name)
+            chosen_indices.remove(drop_idx)
+
+        # Gently damp individual severities when stacking multiple corruptions so images remain recoverable
+        damping = 1.0 if len(chosen_indices) == 1 else (0.85 if len(chosen_indices) == 2 else 0.75)
+
+        deg_mask = np.zeros(num_types, dtype=np.float32)
+        severity_vec = np.zeros(num_types, dtype=np.float32)
+        deg_severity_map = {}
+
+        for idx in chosen_indices:
+            deg_name = self.degradation_types[idx]
+            sev_idx = random.randint(0, len(self.severity_levels) - 1)
+            raw_sev = float(self.severity_levels[sev_idx]) * damping
+            adj_sev = float(self._adjust_severity(deg_name, raw_sev))
+            deg_mask[idx] = 1.0
+            severity_vec[idx] = adj_sev
+            deg_severity_map[deg_name] = adj_sev
+
+        degraded = self.apply_compound_degradation(image, deg_severity_map)
+        return degraded, deg_mask, severity_vec
 
     def apply_named_degradation(self, image, deg_type_name, severity):
         """Apply a specific degradation with adjusted severity."""
@@ -274,8 +302,8 @@ class ImageRestorationDataset(torch.utils.data.Dataset):
             x = (w - size) // 2
             clean_image = clean_image[y:y+size, x:x+size]
         
-        # Apply degradation
-        degraded_image, deg_type, severity_level = self.degradation_pipeline.apply_degradation(clean_image)
+        # Apply single or compound degradation (returns 8D mask and 8D continuous severity vector)
+        degraded_image, deg_mask, severity_vec = self.degradation_pipeline.apply_degradation(clean_image)
         
         # Convert to tensors [0, 1] range
         clean_tensor = torch.from_numpy(clean_image.astype(np.float32) / 255.0).permute(2, 0, 1)
@@ -284,8 +312,8 @@ class ImageRestorationDataset(torch.utils.data.Dataset):
         return {
             'degraded': degraded_tensor,
             'clean': clean_tensor,
-            'deg_type': torch.tensor(deg_type, dtype=torch.long),
-            'severity': torch.tensor(severity_level, dtype=torch.long),
+            'deg_type': torch.from_numpy(deg_mask),
+            'severity': torch.from_numpy(severity_vec),
         }
 
 
